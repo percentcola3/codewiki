@@ -251,7 +251,7 @@ deep-analyzer 在 `deep-analysis.json` 中产出 5 个候选行为视角 section
   ↓
 如果有 CAN_POSTPONE 项：
   │
-  ├─ 写入 docs/<module>/navigation/pending-confirmations.yml
+  ├─ 写入 .codewiki/modules/<module>/navigation/pending-confirmations.yml
   └─ 在对应文档章节中标注"待确认"
   ↓
 进入 Step 3 生成文档

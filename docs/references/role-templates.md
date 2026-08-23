@@ -4,7 +4,7 @@
 
 SKILL.md 在 Step 3/4/5 引用本文件，不在 SKILL.md 内重复模板细节。
 
-## 1. `docs/<module>/README.md` — 模块总入口
+## 1. `.codewiki/modules/<module>/README.md` — 模块总入口
 
 README 是**角色路由器**（v3.6 沿用 v3.5 结构，仅路径更新）。固定 6 节：
 
@@ -351,7 +351,7 @@ evidence:
 
 ## 4. Navigation 层 — bindings + index.yml 后备模板
 
-主入口是 `codewiki_explore`；`docs/<module>/navigation/index.yml` 仅供 MCP 不可用时的正则检索。
+主入口是 `codewiki_explore`；`.codewiki/modules/<module>/navigation/index.yml` 仅供 MCP 不可用时的正则检索。
 
 ```yaml
 version: "1.1"

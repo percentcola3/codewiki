@@ -346,7 +346,7 @@ function collectEvalLogIntents(projectRoot, moduleName) {
         if (!item || typeof item !== 'object') continue
         if (item.outcome !== 'not_found' && item.outcome !== 'partial') continue
         const kbSection = String(item.kb_section || '')
-        const moduleMatch = kbSection.match(/^docs\/([^/]+)\//)
+        const moduleMatch = kbSection.match(/^(?:\.codewiki\/modules|docs)\/([^/]+)\//)
         if (!moduleMatch || moduleMatch[1] !== moduleName) continue
         intents.push({
           question: String(item.question || '').trim(),

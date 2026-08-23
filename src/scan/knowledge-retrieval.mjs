@@ -189,7 +189,9 @@ function parseCaseKnowledge(item, moduleName, sourcePath) {
     entities: asStringArray(item.entities),
     related: asStringArray(item.related),
     supersedes: asStringArray(item.supersedes),
-    evidence: evidenceRefs.map(id => ({ id })),
+    // file:line 形式的 evidence 走 code_refs（绑定层可解析到文件节点）；
+    // evidence 只保留已是 nav:* ID 的引用，避免 strict 绑定校验误报。
+    evidence: evidenceRefs.filter(id => id.startsWith('nav:')).map(id => ({ id })),
     code_refs: codeRefs,
     path: sourcePath,
     headings: [],
@@ -671,7 +673,7 @@ function sourceFingerprint(projectRoot, moduleDir, moduleName) {
   return sha1(parts.join('\n'))
 }
 
-function moduleNameFromManifest(moduleDir) {
+export function moduleNameFromManifest(moduleDir) {
   const manifest = readText(join(moduleDir, 'manifest.yml'))
   const match = manifest.match(/^module:\s*["']?([^\n"']+)/m)
   return String(match?.[1] || basename(moduleDir)).trim()
@@ -766,18 +768,20 @@ function manifestTargetPaths(moduleDir) {
   }
 }
 
-function moduleDirs(projectRoot, requestedModule) {
-  const docsRoot = join(projectRoot, 'docs')
+export const MODULES_ROOT = '.codewiki/modules'
+
+export function moduleDirs(projectRoot, requestedModule) {
+  const modulesRoot = join(projectRoot, MODULES_ROOT)
   if (requestedModule) {
     const direct = resolve(projectRoot, requestedModule)
     if (existsSync(direct) && statSync(direct).isDirectory()) return [direct]
-    const underDocs = join(docsRoot, requestedModule)
-    return existsSync(underDocs) ? [underDocs] : []
+    const underModules = join(modulesRoot, requestedModule)
+    return existsSync(underModules) ? [underModules] : []
   }
-  if (!existsSync(docsRoot)) return []
-  return readdirSync(docsRoot, { withFileTypes: true })
+  if (!existsSync(modulesRoot)) return []
+  return readdirSync(modulesRoot, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
-    .map(entry => join(docsRoot, entry.name))
+    .map(entry => join(modulesRoot, entry.name))
     .filter(dir => existsSync(join(dir, 'manifest.yml')) || KNOWLEDGE_DIRS.some(name => existsSync(join(dir, name))))
 }
 
@@ -916,7 +920,7 @@ function loadModuleIndex(projectRoot, moduleDir, options = {}) {
 export function buildProjectIndex(options = {}) {
   const projectRoot = resolve(options.projectRoot || process.cwd())
   const dirs = moduleDirs(projectRoot, options.module)
-  if (dirs.length === 0) throw new Error(`未找到 codewiki 知识库: ${options.module || join(projectRoot, 'docs')}`)
+  if (dirs.length === 0) throw new Error(`未找到 codewiki 知识库: ${options.module || join(projectRoot, MODULES_ROOT)}`)
   assertUniqueModuleNames(dirs)
   return dirs.map(moduleDir => buildModuleIndex(projectRoot, moduleDir, {
     writeBindings: options.writeBindings !== false,
@@ -1142,7 +1146,7 @@ export function exploreKnowledgeBase(options = {}) {
   if (!query) throw new Error('query 不能为空')
   const projectRoot = resolve(options.projectRoot || process.cwd())
   const dirs = moduleDirs(projectRoot, options.module)
-  if (dirs.length === 0) throw new Error(`未找到 codewiki 知识库: ${options.module || join(projectRoot, 'docs')}`)
+  if (dirs.length === 0) throw new Error(`未找到 codewiki 知识库: ${options.module || join(projectRoot, MODULES_ROOT)}`)
   assertUniqueModuleNames(dirs)
   const gitState = projectGitState(projectRoot)
   const moduleResults = dirs

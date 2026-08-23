@@ -15,7 +15,7 @@ function write(filePath, content) {
 
 function fixture() {
   const projectDir = mkdtempSync(join(tmpdir(), 'codewiki-retrieval-'))
-  const moduleDir = join(projectDir, 'docs', 'orders')
+  const moduleDir = join(projectDir, '.codewiki', 'modules', 'orders')
   const navDir = join(moduleDir, 'navigation')
   write(join(moduleDir, 'manifest.yml'), 'version: "3.6"\nmodule: orders\ntarget_dirs: [src]\nbase_commit: ""\n')
   write(join(moduleDir, 'product', '01-订单导出-flow.md'), [

@@ -52,7 +52,7 @@ confidence：`A`（AST 逐字段直证）/ `B`（AST 候选经 LLM 读码补证�
 subagent 返回结构化 JSON（对齐 output-schema.md 的 `field_lineage_llm_patch` 契约），主 skill 合并写回 `field-lineage/pages/<page-id>.json`。`source_api_patches` 必须按 `protocol + method + endpoint` 合并进 `source_apis[]`。合并后运行：
 
 ```bash
-codewiki scan <target> --output docs/<module>（增量含 --reindex 语义）
+codewiki scan <target> --output .codewiki/modules/<module>（增量含 --reindex 语义）
 ```
 
 该命令只读取补证后的 pages JSON，重建 A/B 级权威反向索引、`pending_llm_verification` 和 `graph-index.json` 字段指纹，不覆盖 LLM patch。
@@ -151,9 +151,9 @@ Phase A 关键确认点（合并到一次交互）：
 Product/Frontend Markdown 的 `kb:*` ID 与 Navigation JSON 的 `nav:*` ID 通过一行一个 JSON 的多对多关系关联。运行：
 
 ```bash
-codewiki index --project <project-root> --module docs/<module>
+codewiki index --project <project-root> --module .codewiki/modules/<module>
 codewiki evaluate --project <project-root> \
-  --cases docs/<module>/retrieval-cases.json --repeat 5 \
+  --cases .codewiki/modules/<module>/retrieval-cases.json --repeat 5 \
   --output .codewiki/codewiki-evaluation-<module>.json
 ```
 
@@ -192,7 +192,7 @@ codewiki evaluate --project <project-root> \
 - 改某接口字段影响哪些页面字段？
 - 某页面上所有字段的溯源清单？
 
-### 4.5.4 `docs/<module>/README.md`（角色路由器，v3.6 更新阅读路径）
+### 4.5.4 `.codewiki/modules/<module>/README.md`（角色路由器，v3.6 更新阅读路径）
 
 固定 6 节。角色阅读路径改为：
 

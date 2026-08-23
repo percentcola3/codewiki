@@ -6,7 +6,7 @@
 
 满足以下条件时按 v3.5 迁移处理：
 
-- `docs/<module>/manifest.yml#version` 不为 `3.6`；并且
+- `.codewiki/modules/<module>/manifest.yml#version` 不为 `3.6`；并且
 - Frontend 仍包含 `01-架构总览-README.md`、`02-组件地图-component-map.md` 等 v3.5 命名，或 Navigation 缺少 v3.6 的 `field-lineage/`。
 
 先只读收集：
@@ -34,7 +34,7 @@
 
 ## 2. 建立旁路副本
 
-在 `docs/.<module>.v36-stage/` 创建完整工作副本。所有结构转换、LLM 补充、AST 补跑、bindings 构建和评测都在旁路目录执行；验证通过前不要改写、重命名或删除 `docs/<module>/`。
+在 `.codewiki/modules/<module>.v36-stage/` 创建完整工作副本。所有结构转换、LLM 补充、AST 补跑、bindings 构建和评测都在旁路目录执行；验证通过前不要改写、重命名或删除 `.codewiki/modules/<module>/`。
 
 归档是回滚措施，不是迁移输入。迁移始终从当前 v3.5 文件读取事实，避免遗漏人工维护但源码无法推导的规则。
 
@@ -87,7 +87,7 @@ Product 继续按业务流组织。不要为了减少文件数合并不同业务
 ```bash
 codewiki index \
   --project <project-root> \
-  --module docs/.<module>.v36-stage
+  --module .codewiki/modules/<module>.v36-stage
 ```
 
 必须满足：
@@ -113,9 +113,9 @@ codewiki index \
 
 验证通过后再切换：
 
-1. 将当前 `docs/<module>/` 移到同级临时备份目录。
-2. 将 `docs/.<module>.v36-stage/` 移到 `docs/<module>/`。
-3. 确认新模块可严格构建和检索后，将临时备份移动到 `docs/<module>/.archive/v3.5-<date>/`。
+1. 将当前 `.codewiki/modules/<module>/` 移到同级临时备份目录。
+2. 将 `.codewiki/modules/<module>.v36-stage/` 移到 `.codewiki/modules/<module>/`。
+3. 确认新模块可严格构建和检索后，将临时备份移动到 `.codewiki/modules/<module>/.archive/v3.5-<date>/`。
 4. 写 revision，记录复用文件、补跑阶段、语义映射、待确认项、评测前后指标和新 base_commit。
 
 任一步失败都停止后续操作：如果旧模块已经移走而新模块未就位，立即把旧模块移回原路径。不要使用 `rm -rf` 清理旧模块或备份。
@@ -123,8 +123,8 @@ codewiki index \
 建议在项目 `.gitignore` 增加：
 
 ```gitignore
-docs/*/.archive/
-docs/.*.v36-stage/
+.codewiki/modules/*/.archive/
+.codewiki/modules/.*.v36-stage/
 .codewiki/codewiki-migration/
 ```
 

@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { createHash } from 'node:crypto'
-import { exploreKnowledgeBase, formatExploreResult, tokenize } from './knowledge-retrieval.mjs'
+import { exploreKnowledgeBase, formatExploreResult, tokenize, MODULES_ROOT } from './knowledge-retrieval.mjs'
 
 const PROTOCOL_VERSION = '2024-11-05'
 const EVIDENCE_QUERY_PATTERN = /怎么实现|如何实现|代码|调用链|字段.{0,20}(?:来源|从|哪个接口)|影响|如何修改|怎么改|改动/
@@ -39,15 +39,15 @@ function failure(id, code, message) {
 }
 
 function fallbackRoots(projectRoot, moduleName) {
-  const docsRoot = join(projectRoot, 'docs')
+  const modulesRoot = join(projectRoot, MODULES_ROOT)
   if (moduleName) {
-    const moduleDir = join(docsRoot, moduleName)
+    const moduleDir = join(modulesRoot, moduleName)
     return existsSync(moduleDir) ? [moduleDir] : []
   }
-  if (!existsSync(docsRoot)) return []
-  return readdirSync(docsRoot, { withFileTypes: true })
+  if (!existsSync(modulesRoot)) return []
+  return readdirSync(modulesRoot, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
-    .map(entry => join(docsRoot, entry.name))
+    .map(entry => join(modulesRoot, entry.name))
 }
 
 function fallbackFiles(root, output = []) {

@@ -65,7 +65,7 @@ test('ai-only candidate cases do not enter scenario coverage denominator', () =>
 test('assessModuleConfidence combines validation report, doc coverage and retrieval traces', () => {
   const projectRoot = mkdtempSync(join(tmpdir(), 'codewiki-confidence-'))
   try {
-    const moduleDir = join(projectRoot, 'docs', 'orders')
+    const moduleDir = join(projectRoot, '.codewiki', 'modules', 'orders')
     const navDir = join(moduleDir, 'navigation')
     mkdirSync(join(navDir, 'field-lineage'), { recursive: true })
     mkdirSync(join(moduleDir, 'product'), { recursive: true })
@@ -73,8 +73,8 @@ test('assessModuleConfidence combines validation report, doc coverage and retrie
     writeFileSync(join(navDir, 'validation-report.json'), JSON.stringify({
       status: 'PASS',
       per_file_confidence: [
-        { doc: 'docs/orders/product/01-a.md', ratio: 0.95 },
-        { doc: 'docs/orders/product/02-b.md', ratio: 0.85 },
+        { doc: '.codewiki/modules/orders/product/01-a.md', ratio: 0.95 },
+        { doc: '.codewiki/modules/orders/product/02-b.md', ratio: 0.85 },
       ],
     }))
     writeFileSync(join(navDir, 'branch-routes.json'), JSON.stringify({
@@ -88,7 +88,7 @@ test('assessModuleConfidence combines validation report, doc coverage and retrie
       { at, query: '退款什么情况下允许', module: 'orders', modules: ['orders'], found: false, fallback: true, stale: false, latency_ms: 3 },
       { at, query: '不相关的问题', module: 'other', modules: ['other'], found: false, fallback: false, stale: false, latency_ms: 1 },
     ]
-    const assessment = assessModuleConfidence(projectRoot, { dir: moduleDir, name: 'orders' }, traces, 30)
+    const assessment = assessModuleConfidence(projectRoot, { dir: moduleDir, name: 'orders' }, traces, [], 30)
     assert.equal(assessment.evidence.evidenceScore, 0.9)
     assert.equal(assessment.scenario_coverage.applicable, 2)
     assert.equal(assessment.scenario_coverage.verified, 1)
