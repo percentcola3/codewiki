@@ -1,0 +1,49 @@
+{
+  "cases": [
+    {
+      "name": "UI 入口",
+      "module": "<module>",
+      "query": "XXX 按钮怎么实现？",
+      "expected_knowledge_ids": ["kb:<module>:product:<topic>"],
+      "required_evidence_ids": ["nav:ui-event:<stable-key>"]
+    },
+    {
+      "name": "业务规则",
+      "module": "<module>",
+      "query": "什么情况下允许退款？",
+      "expected_knowledge_ids": ["kb:<module>:product:<topic>"]
+    },
+    {
+      "name": "用户反馈",
+      "module": "<module>",
+      "query": "失败后用户会看到什么？",
+      "expected_knowledge_ids": ["kb:<module>:product:<topic>"]
+    },
+    {
+      "name": "字段血缘",
+      "module": "<module>",
+      "query": "这个字段从哪里来？",
+      "expected_knowledge_ids": ["kb:<module>:frontend:<topic>"],
+      "required_evidence_ids": ["nav:field-lineage:<stable-key>"]
+    },
+    {
+      "name": "影响分析",
+      "module": "<module>",
+      "query": "修改接口字段会影响哪些页面？",
+      "expected_knowledge_ids": ["kb:<module>:frontend:<topic>"]
+    },
+    {
+      "name": "状态路径",
+      "module": "<module>",
+      "query": "从处理中到失败经历了什么？",
+      "expected_knowledge_ids": ["kb:<module>:frontend:<topic>"]
+    },
+    {
+      "name": "无答案",
+      "module": "<module>",
+      "query": "知识库明确不包含的问题",
+      "expect_found": false,
+      "forbidden_text": ["禁止出现的错误结论"]
+    }
+  ]
+}

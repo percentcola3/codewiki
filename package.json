@@ -1,0 +1,46 @@
+{
+  "name": "codewiki",
+  "version": "0.1.0",
+  "description": "Frontend-repo knowledge base CLI: deterministic AST scan pipeline, hybrid semantic/graph retrieval MCP, and confidence evaluation for AI coding agents.",
+  "type": "module",
+  "bin": {
+    "codewiki": "./bin/codewiki.js"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "integrations/",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@swc/wasm": "^1.15.0",
+    "@vue/compiler-sfc": "^3.5.32",
+    "jlouvain": "^2.0.0",
+    "yaml": "^2.8.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "knowledge-base",
+    "code-graph",
+    "ast",
+    "mcp",
+    "retrieval",
+    "ai-agents",
+    "vue",
+    "frontend",
+    "code-navigation",
+    "rag"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codewiki/codewiki.git"
+  }
+}
