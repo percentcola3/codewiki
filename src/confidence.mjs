@@ -169,7 +169,7 @@ function renderReport(result) {
   for (const module of result.modules) {
     lines.push(`\n## 模块：${module.module}`)
     const evidence = module.evidence
-    lines.push(`- 证据分：${evidence?.evidenceScore ?? 'N/A'}（${evidence ? `${evidence.files} 篇文档，校验 ${evidence.status}` : '未运行 --validate'}）`)
+    lines.push(`- 证据分：${evidence?.evidenceScore ?? 'N/A'}（${evidence ? `${evidence.files} 篇文档，校验 ${evidence.status ?? '未知'}` : '未运行 --validate'}）`)
     lines.push(`- 场景覆盖：${module.scenario_coverage.verified}/${module.scenario_coverage.applicable}${module.scenario_coverage.score != null ? `（score=${module.scenario_coverage.score}）` : ''}`)
     lines.push(`- Gap 闭环：${module.gap_closure.closed}/${module.gap_closure.discovered}`)
     const usage = module.retrieval_usage
