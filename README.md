@@ -209,7 +209,7 @@ docs/                  Agent 工作流 + 产物 schema + 模板
 integrations/          Claude Code Hook 等宿主集成
 ```
 
-依赖刻意保持极简：`@swc/wasm`（纯 WASM 解析，无原生编译）、`@vue/compiler-sfc`、`jlouvain`、`yaml`。TypeScript 解析为可选降级路径（从目标项目解析）。
+依赖刻意保持极简：`@swc/wasm`（纯 WASM 解析，无原生编译）、`@vue/compiler-sfc`、`jlouvain`、`yaml`、`marked`（preview 时 Markdown→HTML 渲染）。TypeScript 解析为可选降级路径（从目标项目解析）。
 
 ## 开发
 

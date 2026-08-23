@@ -5,10 +5,15 @@
 //   <module>.html     模块页（侧边栏文档导航 + 折叠章节 + 证据高亮 + mermaid）
 //   site-data.json    客户端搜索索引
 //
-// 语义层源文件保持 Markdown（frontmatter 供检索引擎/校验器消费），HTML 是浏览视图。
+// 语义层源文件保持 Markdown（frontmatter 供检索引擎/校验器消费），HTML 是 preview 时
+// 本地渲染的浏览视图 —— LLM 只写 Markdown，不产生任何 HTML token 成本。
+// Markdown→HTML 用 marked（GFM 表格/嵌套列表等边缘情况保真度优于手写渲染器）。
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { marked } from 'marked'
 import { MODULES_ROOT, moduleDirs, moduleNameFromManifest } from './scan/knowledge-retrieval.mjs'
+
+marked.setOptions({ gfm: true, breaks: false })
 
 const GRADE_COLORS = { A: '#16a34a', B: '#65a30d', C: '#d97706', D: '#ea580c', E: '#dc2626', N_A: '#6b7280' }
 
@@ -46,13 +51,6 @@ function parseFrontmatter(content) {
   return { data, body: content.slice(match[0].length) }
 }
 
-function inline(text) {
-  return escapeHtml(text)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\[([^\]]+)]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-}
-
 // 证据引用（path/file.ext:123）渲染为可复制的高亮 chip
 function withEvidenceChips(html) {
   return html.replace(/([^<"'\w])([\w./@-]+\.(?:vue|ts|js|tsx|jsx|mjs|cjs|json|yml|yaml)):(\d+)\b/g,
@@ -60,78 +58,11 @@ function withEvidenceChips(html) {
 }
 
 function mdToHtml(markdown) {
-  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n')
-  const out = []
-  let inCode = false
-  let codeLang = ''
-  let codeLines = []
-  let listType = null
-  let tableBuffer = []
-
-  function flushList() {
-    if (listType) { out.push(listType === 'ol' ? '</ol>' : '</ul>'); listType = null }
-  }
-
-  function flushTable() {
-    if (tableBuffer.length === 0) return
-    const rows = tableBuffer.filter(row => !/^\s*\|?[\s:|-]+\|?\s*$/.test(row))
-    if (rows.length > 0) {
-      const cells = row => row.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(cell => cell.trim())
-      const body = rows.map((row, index) => {
-        const tag = index === 0 ? 'th' : 'td'
-        return `<tr>${cells(row).map(cell => `<${tag}>${inline(cell)}</${tag}>`).join('')}</tr>`
-      }).join('')
-      out.push(`<table>${body}</table>`)
-    }
-    tableBuffer = []
-  }
-
-  for (const line of lines) {
-    const fence = line.match(/^```\s*(\w*)/)
-    if (fence) {
-      if (inCode) {
-        const code = escapeHtml(codeLines.join('\n'))
-        out.push(codeLang === 'mermaid'
-          ? `<pre class="mermaid">${code}</pre>`
-          : `<pre><code>${code}</code></pre>`)
-        inCode = false
-        codeLines = []
-      } else {
-        flushList(); flushTable()
-        inCode = true
-        codeLang = fence[1]
-      }
-      continue
-    }
-    if (inCode) { codeLines.push(line); continue }
-
-    if (/^\s*\|.*\|\s*$/.test(line)) { flushList(); tableBuffer.push(line); continue }
-    flushTable()
-
-    const heading = line.match(/^(#{1,6})\s+(.*)$/)
-    if (heading) {
-      flushList()
-      const level = Math.min(heading[1].length + 1, 6)
-      out.push(`<h${level} id="${slugify(heading[2])}">${inline(heading[2])}</h${level}>`)
-      continue
-    }
-    const ul = line.match(/^\s*[-*+]\s+(.*)$/)
-    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/)
-    if (ul || ol) {
-      const type = ul ? 'ul' : 'ol'
-      if (listType !== type) { flushList(); out.push(type === 'ol' ? '<ol>' : '<ul>'); listType = type }
-      out.push(`<li>${inline((ul || ol)[1])}</li>`)
-      continue
-    }
-    flushList()
-    const quote = line.match(/^>\s?(.*)$/)
-    if (quote) { out.push(`<blockquote>${inline(quote[1])}</blockquote>`); continue }
-    if (line.trim() === '') continue
-    out.push(`<p>${inline(line)}</p>`)
-  }
-  if (inCode && codeLines.length) out.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
-  flushList(); flushTable()
-  return withEvidenceChips(out.join('\n'))
+  const html = marked.parse(String(markdown || ''))
+  return withEvidenceChips(
+    // mermaid 代码块交给前端 mermaid 库渲染（离线时脚本降级显示源码）
+    html.replace(/<pre><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g, '<pre class="mermaid">$1</pre>'),
+  )
 }
 
 function slugify(text) {
