@@ -1,7 +1,7 @@
 {
   "name": "codewiki",
-  "version": "0.1.0",
-  "description": "Frontend-repo knowledge base CLI: deterministic AST scan pipeline, hybrid semantic/graph retrieval MCP, and confidence evaluation for AI coding agents.",
+  "version": "0.4.0",
+  "description": "Skill-first full-stack business knowledge compiler for Claude Code and Codex, backed by deterministic AST and graph analysis.",
   "type": "module",
   "bin": {
     "codewiki": "./bin/codewiki.js"
@@ -12,8 +12,9 @@
   "files": [
     "bin/",
     "src/",
-    "commands/",
+    "skills/",
     "integrations/",
+    "examples/",
     "docs/",
     "README.md",
     "LICENSE"
@@ -22,7 +23,10 @@
     "@swc/wasm": "^1.15.0",
     "@vue/compiler-sfc": "^3.5.32",
     "jlouvain": "^2.0.0",
-    "marked": "^18.0.10",
+    "marked": "^15.0.12",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-go": "^0.23.4",
+    "tree-sitter-java": "^0.23.5",
     "yaml": "^2.8.1"
   },
   "engines": {
@@ -30,19 +34,27 @@
   },
   "keywords": [
     "knowledge-base",
+    "agent-skills",
+    "claude-code",
+    "codex",
     "code-graph",
     "ast",
     "mcp",
     "retrieval",
     "ai-agents",
     "vue",
-    "frontend",
+    "react",
+    "java",
+    "go",
+    "monorepo",
+    "tree-sitter",
+    "full-stack",
     "code-navigation",
     "rag"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/codewiki/codewiki.git"
+    "url": "git+https://github.com/percentcola3/codewiki.git"
   }
 }

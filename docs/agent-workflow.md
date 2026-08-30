@@ -1,7 +1,11 @@
 # codewiki Agent 工作流 — 模块知识库生成 v3.6
 
-> 本文档面向 AI 编码助手（Claude Code / Codex / Cursor 等）：描述如何用 codewiki CLI 生成并维护 `.codewiki/modules/<module>/` 三层知识库。
-> codewiki CLI 负责确定性 AST 管线、检索索引与证据自检；语义层（product/frontend）由 AI 助手按本工作流撰写，动态关系必须读源码补证。
+> 本文档面向 AI 编码助手（Claude Code / Codex / Cursor 等）：描述 codewiki Skills 如何调用内部 CLI 生成并维护 `.codewiki/modules/<module>/` 知识库。
+> 用户 CLI 只负责 `init`、`upgrade`、`uninstall` 三个项目生命周期操作，其余操作由 Skills 编排。内部 CLI 负责确定性 AST 管线、检索索引与证据自检；product/developer 由 AI 助手基于证据撰写，quality 只保存已确认的缺陷、事故、决策和修正。
+
+> **v0.3 执行补充**：开始生成前先读取 `.codewiki/INSTRUCTIONS.md`。AST 阶段结束后以 `navigation/graph.jsonl` 作为统一机器索引，并按 `NO_IMPACT` / `INDEX_ONLY` / `KNOWLEDGE_IMPACT` 决定是否改写语义文档。Finalize 成功后才接受 Evidence 新指纹；任一校验或 Case 失败会回滚整个模块。
+
+> **多语言执行补充**：业务模块与源码目录分离建模。一个模块可以包含多个 `source_units`，每个 Source Unit 独立记录 path、language、framework、framework_version 和 features。Vue/TypeScript 使用现有深度增强；React 使用 SWC JSX/TSX Profile；Java、Go 使用 Node Tree-sitter。跨语言 HTTP 链路只有 Method + 标准化 Path 精确匹配时才视为 verified。
 
 > **反捏造硬约束（全产物适用，按事实类型分级）**
 >
@@ -20,23 +24,24 @@
 
 > **codewiki 专属约束**
 >
-> - 调用链、组件关系、IPC 通道、Store 字段等结构事实，以 `file-graph.json` / `func-dependencies.json` / `component-refs.json` 为主要来源；脚本未产出的关系，必须由 AI 助手继续读源码补证并给出 `file:line` 后才能写入文档。
+> - 调用链、组件关系、接口、IPC 通道、Store 字段等结构事实，以 `source-units.json` / `framework-facts.json` / `graph.jsonl` 为统一来源；单前端 Source Unit 还可使用 `file-graph.json` / `func-dependencies.json` / `component-refs.json` 的深度增强。脚本未产出的关系，必须由 AI 助手继续读源码补证并给出 `file:line` 后才能写入文档。
 > - `deep-analysis.json` 与 `_intermediate/api-payload-shapes.json` 只提供 candidate-evidence-only 候选信号；不能单独作为业务结论、接口契约或产品限制的强事实来源。
 > - **Product 层（PM/QA 视角）严禁出现技术细节散落**：函数名、IPC 通道名、毫秒数、文件路径、英文状态名一律下沉到尾部"技术证据索引"章节。业务术语翻译只能用 `manifest.business_terms` 表中的项。
-> - **Frontend 层每篇必须有元数据头**：Summary / 适合读 / 不适合读 / 先读再读 / 证据入口。
-> - **Navigation 层保留完整 AST 图**，并用稳定 `nav:*` ID 与语义文档关联。用户自然问答直接调用 `codewiki_explore`；`navigation/index.yml` 只作为无 MCP 时的文本检索后备入口。
-> - 自检由脚本完成（`codewiki scan --validate`）；FAIL 时整批文档标 `> ⚠️ 状态：draft —— N/M 条结论缺少代码证据`。
+> - **Developer 层每篇必须有元数据头**：Summary / 适合读 / 不适合读 / 先读再读 / 证据入口。
+> - **Navigation 层保留完整 AST 图**，并用稳定 `nav:*` ID 与语义文档关联。用户自然问答由 codewiki-query Skill 调用内部检索接口；`navigation/index.yml` 是纯文本后备入口。
+> - **Quality 层只保存经确认且有来源的知识**：缺陷、事故和决策使用 `npx codewiki generate` 与 typed evidence；不得把未确认猜测写入共享知识。
+> - 自检由 `npx codewiki generate <target> --module <module> --finalize` 完成；FAIL 时整批文档标 `> ⚠️ 状态：draft —— N/M 条结论缺少代码证据`。
 
-codewiki 生成的三层知识库同时服务四类受众：
+codewiki 生成的 product / developer / quality / navigation 知识同时服务四类受众：
 
 | 受众 | 入口 | 核心目标 |
 |------|------|---------|
 | PM/业务/QA | `README.md` → `product/` | 写 PRD、定验收口径、评估能力边界与不可承诺项 |
-| 前端开发 | `README.md` → `frontend/` | 建立实现心智模型（主链路/状态/分支/恢复/外部依赖） |
-| AI/自动化 | `codewiki_explore`（后备：`navigation/index.yml`） | 用户自然提问，先命中业务语义，再展开完整、可追证的代码图 |
+| 研发 | `README.md` → `developer/` | 建立实现心智模型（主链路/状态/分支/恢复/外部依赖） |
+| AI/自动化 | `codewiki-query` Skill（后备：`navigation/index.yml`） | 用户自然提问，先命中业务语义，再展开完整、可追证的代码图 |
 
 **v3.6 核心变化（本版）**：
-- **产物瘦身**：Product 层从 9 章 → 3 大块（业务全景 / 字段级页面逻辑 / 改动决策卡）；Frontend 层从 6 文件 → 3 文件（架构与调用图 / 变更影响导航 / 坑点与状态）
+- **产物瘦身**：Product 层从 9 章 → 3 大块（业务全景 / 字段级页面逻辑 / 改动决策卡）；Developer 层统一为 3 个阅读入口（架构与调用图 / 变更影响导航 / 坑点与状态）
 - **新增 Step 2.7.5 字段级溯源生成**：产 `field-lineage/{index,pages/*,reverse-index}.json`，作为产品层 §2 markdown 的**唯一 SSOT**（详见 `references/layers.md § Step 2.7.5`）
 - **新增 5 个脚本能力**（`scripts/`）：
   - `nav-parser.mjs` 增强 template AST 字段绑定抽取（`template_bindings` 字段进 `component-refs.json`）
@@ -47,8 +52,8 @@ codewiki 生成的三层知识库同时服务四类受众：
 - **`--update` 增量升级为四档**：`NONE` / `STRUCTURAL 短路` / `FIELD_ONLY` / `COSMETIC` —— 改注释类变更（COSMETIC）零 LLM
 - **中间产物落盘契约**：`_intermediate/*.draft.json` + `_intermediate/*.review.json`，主对话流只读窄字段（避免 Phase A/B/C 造成上下文膨胀）
 - **反向索引结构化**：`field-lineage/reverse-index.json` 用数组格式（method/endpoint/raw_field/used_by 分离），grep 友好
-- **语义文档与代码图双向绑定**：Product/Frontend Markdown 使用稳定 `kb:*` ID，Navigation JSON 使用稳定 `nav:*` ID，统一写入 `navigation/bindings.jsonl`
-- **自然问答检索入口**：`codewiki_explore` 根据用户问题自动选择语义或证据检索，按“语义 Markdown → bindings → AST 图 2-3 跳 → 关联 Markdown”展开；派生索引写入 `.codewiki/cache/`。知识库本体位于 `.codewiki/modules/`（本地，不随 git 提交），用 `codewiki preview` 浏览 HTML 视图
+- **语义文档与代码图双向绑定**：Product/Developer Markdown 使用稳定 `kb:*` ID，Navigation JSON 使用稳定 `nav:*` ID，统一写入 `navigation/bindings.jsonl`
+- **自然问答检索入口**：codewiki-query Skill 调用内部查询，根据用户问题自动选择语义或证据检索，按“语义 Markdown → bindings → AST 图 2-3 跳 → 关联 Markdown”展开；派生索引写入 `.codewiki/cache/`。知识库本体位于 `.codewiki/modules/` 并随 Git 共享，预览由 codewiki-review Skill 生成
 
 **v3.5 保留能力**：
 - README 角色路由器 · 反捏造按事实类型分级 · Step 2.6 候选行为信号 · Step 2.9 待确认项收集
@@ -60,19 +65,19 @@ codewiki 生成的三层知识库同时服务四类受众：
 ## 调用模式
 
 ```
-「扫描 <path> 生成知识库」                  # 全量生成（path 优先），Agent 执行 codewiki scan + 撰写语义层
+「扫描 <path> 生成知识库」                  # 全量生成（path 优先），Agent 执行 npx codewiki generate + 撰写语义层
 「更新知识库」(--update)                    # 无参增量：扫所有 .codewiki/modules/*/manifest.yml，
                                           #   先对比 base_commit ↔ 工作区并列出代码增量，
                                           #   再只更新受影响的 module
 「更新知识库」--bugfix [--id <DEF>]         # 缺陷修复后的增量更新；除 update 常规产物外，
                                           #   额外生成 .codewiki/modules/<module>/quality/defects/<id>-<topic>.md
---rewrite <layer>                          # 重写某层: product|frontend|navigation
+--rewrite <layer>                          # 重写某层: product|developer|navigation
 --patch <file>                             # 更新单个文件
 多入口/多模块                               # 每个路径独立生成
 基于意图推断                                # 未给路径时，基于用户意图推断目标
 ```
 
-**知识库更新统一入口**：`.codewiki/modules/<module>/{product,frontend,navigation}/` 正文、`manifest.yml`、`revisions/` 全部由增量更新流程写入。
+**知识库更新统一入口**：`.codewiki/modules/<module>/{product,developer,quality,navigation}/`、`manifest.yml`、`retrieval-cases.json` 和 `revisions/` 都是共享资产；quality 只能在证据和用户确认齐备后写入。
 
 未提供明确 `<path>` 且不是 `--update` 时，不要默认使用 `.`，也不要直接执行 AST。必须先根据用户业务意图、最近对话、当前项目结构和路由/菜单/页面文件推断候选入口；业务意图必须先输出候选入口清单，用户确认后才进入 Step 1.5 和 AST 管道。只有用户明确说"你判断后直接执行"时，才允许自动采纳一个 high confidence 入口，并在 manifest 中标 `entry_review.mode: auto-adopted`。
 
@@ -90,13 +95,13 @@ codewiki 生成的三层知识库同时服务四类受众：
 ## 执行流程概览
 
 ```
-Step 1 确定初始 target
+Step 1 确定业务模块与 Source Units
   ↓
 Step 1.2 候选入口审阅 → 校准分析边界
   ↓
 Step 1.5 反向追踪 → 扩展 target（可能迭代）
   ↓
-Step 2 AST 管道（对扩展后的全部 target 执行）
+Step 2 AST/Profile 管道（对扩展后的全部 Source Units 执行）
   ↓
 Step 2.3 AI 助手动态链路补证 → 发现 target 外调用者时回到 Step 1.5 扩展
   ↓
@@ -124,7 +129,7 @@ Step 3 生成 Layer 1（Product，PM 视角，3 大块 v3.6：业务全景 / 字
   ├─ review=needs_confirm 时只展示 confirm_asks，确认并更新 draft 后重新 review
   ├─ Phase C 完成后回顾
   ↓
-Step 4 生成 Layer 2（Frontend，3 文件 v3.6：架构与调用图 / 变更影响导航 / 坑点与状态）
+Step 4 生成 Layer 2（Developer；单前端沿用 3 文件模板，多语言模块按跨端链路 / 服务边界 / 影响风险组织）
   ├─ Phase A 一次性对齐（架构分层 + hub 组件 + 接口语义 + 状态机边界 + 核心链路 medium 项）
   ├─ Phase B 每文件先写 _intermediate/layer2-<nn>-<name>.draft.json
   ├─ 独立 review pass 写对应 .review.json；主对话只读 review，不读 draft 全文
@@ -135,14 +140,14 @@ Step 4.5 生成语义元数据 + bindings.jsonl + 检索索引 + README（index.
   ↓
 Step 5 写 manifest（含 business_terms + coverage_assertions + confirmation_checkpoint）
   ↓
-Step 6 证据自检（codewiki scan --validate）→ FAIL 时整批文档标 draft
+Step 6 证据自检与 Case 回归（npx codewiki generate --finalize）→ FAIL 时整批文档标 draft
 ```
 
 ## Step 1: 确定目标和模式
 
-- **模块模式**：目标是叶子模块（有 components/ 或 pages/ 或 route.ts）→ 单个 `.codewiki/modules/<module>/`
-- **多入口模式**：目标是多个页面/路由/组件入口 → 每个入口生成独立 `.codewiki/modules/<module>/`，再生成汇总索引
-- **多模块模式**：目标是模块父目录（多个子目录各有 route.ts）→ 每个子模块生成 `.codewiki/modules/<child>/` + 顶层 `.codewiki/modules/<parent>/`
+- **单 Source Unit**：业务模块集中在一个前端或后端目录 → 单个 `.codewiki/modules/<module>/`
+- **多 Source Unit**：同一业务模块横跨多个前后端 Workspace → 在同一个模块下配置多个 `source_units`
+- **多业务模块**：代码父目录包含多个独立业务域 → 每个业务域生成独立 `.codewiki/modules/<module>/`，不要仅因位于同一 Monorepo 就合并
 - 记录 `git rev-parse HEAD` 作为 base_commit
 - `--update` 模式：从 manifest.yml 读取 base_commit，用 `git diff --name-status <base_commit>` + `git ls-files --others --exclude-standard` 先确认代码增量，再更新知识库
 - 如果存在 `.codewiki/modules/<module>/context/snapshot-*.md`，先读取最近相关文档，把其中的主链路、数据流转、调用链路、待确认项作为 Layer 1/2 的补充输入；仍以 AST 输出和源码证据为准，不直接照抄 snapshot 结论。
@@ -164,12 +169,12 @@ rg -n "path:|name:|component:|defineAsyncComponent|import\\(" src
 rg -n "BrowserWindow|loadURL|loadFile|preload" electron src
 ```
 
-### 多入口和多模块处理
+### 多 Source Unit 和多模块处理
 
-- 输入多个路径时，把每个路径当作独立 target，逐个执行三阶段 AST 管道。
-- 从意图推断出多个入口时，先按模块边界分组；同一业务模块下的多个入口可以合并到同一个 `.codewiki/modules/<module>/`，跨业务模块必须拆分。
-- 每个 target 使用稳定的 module 名：优先路由名/目录名，其次页面组件名；避免 `index`、`pages` 这类弱名称。
-- 多 target 完成后，在父级 `.codewiki/modules/<parent>/README.md` 写汇总：入口列表、模块关系、共享 hub 文件、跨模块调用链、待确认项。
+- 同一业务模块的多个路径写入 `codewiki.yml#modules[].source_units`，一次生成统一图，不逐个生成互相覆盖的模块。
+- 每个 Source Unit 单独识别语言、框架和版本；显式配置优先，lockfile 和构建清单次之，源码特征只作候选。
+- 从意图推断出多个入口时，先按业务边界分组；跨业务模块必须拆分，跨语言不是拆分理由。
+- 模块名优先使用稳定业务域名；Source Unit 名使用部署单元或 Workspace 名，避免 `src`、`app` 这类弱名称。
 
 ## Step 1.2 / Step 1.5 — 候选入口审阅与范围扩展
 
@@ -177,30 +182,34 @@ rg -n "BrowserWindow|loadURL|loadFile|preload" electron src
 
 ## Step 2: 生成 Layer 3（AI Navigation）
 
-前置条件：目标项目可运行 `codewiki` CLI（`npm i -g codewiki` 或 `npx codewiki`）。
+前置条件：目标项目已运行 `npx codewiki init`，Skill 内部通过 `npx codewiki` 调用执行接口。
 
-`codewiki scan` 一条命令串起全部 AST 阶段（先 nav-parser；随后 graph-cluster、data-shape-tracer、pinia-tracker；deep-analyzer 等待 graph-cluster；最后 field-lineage 融合）：
+`npx codewiki generate` 先执行 Source Unit/Profile 事实提取。单个前端 Source Unit 继续执行 nav-parser、graph-cluster、data-shape-tracer、pinia-tracker、deep-analyzer、field-lineage 深度增强；多 Source Unit 模块使用统一事实图，避免把无关 Workspace 扫入：
 
 ```bash
-codewiki scan <target> --output .codewiki/modules/<module> [--incremental]
+npx codewiki generate <target> --module <module> [--update]
 ```
 
-多入口/多模块时，对每个 target 分别执行同样的序列。
-
-**字段溯源与检索脚本**（字段溯源已包含在 scan 管线内，检索索引在 Step 4.5 调用）：
+`codewiki.yml` 已声明 Source Units 时可以省略 `<target>`：
 
 ```bash
-codewiki index --project <project-root> --module .codewiki/modules/<module>
-# 首次生成和结构性更新必须跑固定七类问题集；COSMETIC 可跳过
-codewiki evaluate --project <project-root> \
-  --cases .codewiki/modules/<module>/retrieval-cases.json --repeat 5 \
-  --output .codewiki/evaluation-<module>.json
+npx codewiki generate --module <module> [--update]
+```
+
+字段溯源包含在 generate 管线内；语义文档完成后统一收尾：
+
+```bash
+npx codewiki generate <target> --module <module> --finalize
+# 已配置多 Source Unit 时：
+npx codewiki generate --module <module> --finalize
 ```
 
 产出 `.codewiki/modules/<module>/navigation/`：
 
 | 文件 | 来源 | 内容 |
 |------|------|------|
+| source-units.json | fact-extractor | 当前业务模块的语言、框架、版本、能力和目录边界 |
+| framework-facts.json | SWC/Vue Profile/Tree-sitter | Vue、React、Java、Go 的统一节点、关系、Endpoint 和跨语言链路 |
 | file-graph.json | nav-parser | 文件节点 + 多类型依赖边 |
 | func-dependencies.json | nav-parser | 导出函数及其调用关系 |
 | component-refs.json | nav-parser | Vue 组件使用、条件、事件；**v3.6 新增 `template_bindings`** |
@@ -215,10 +224,13 @@ codewiki evaluate --project <project-root> \
 | field-lineage/index.json | field-lineage | **v3.6 新增**：全模块字段级溯源元信息 |
 | field-lineage/pages/<page-id>.json | field-lineage (+ LLM 补证) | **v3.6 核心**：每页面字段完整链路（组件 → store → 接口 → 加工规则 → 异常态）|
 | field-lineage/reverse-index.json | field-lineage | **v3.6 新增**：接口 → 字段反查（结构化数组，grep 友好）|
-| bindings.jsonl | codewiki index | `kb:*` 语义文档与 `nav:*` 代码证据的稳定多对多绑定 |
+| bindings.jsonl | generate --finalize | `kb:*` 语义文档与 `nav:*` 代码证据的稳定多对多绑定 |
+| graph.jsonl | generate / generate --finalize | 稳定、去重的统一图索引，用于影响面、链路、血缘和检索；不是面向人的正文 |
 | data-shapes.json | data-shape-tracer `--legacy-copy` | 仅兼容旧消费者时生成；默认不产出 |
 
-**脚本执行后必须读取主链路 JSON 文件**。`graph-quality.json` 用于判断哪些依赖只能作为低置信入口；`deep-analysis.json` 只含候选行为视角 section（详见 Step 2.6），必须经 AI 助手读码补证后才能进入 Layer 1/2 结论。
+**脚本执行后必须先读取 `source-units.json`、`framework-facts.json` 和 `graph.jsonl`**。单前端 Source Unit 再读取 `graph-quality.json` 和深度增强产物。Tree-sitter 的语法定义是确定性结构事实，但重载、Interface 动态分派等目标解析仍可能是 candidate；`deep-analysis.json` 只含候选行为视角，必须经 AI 助手读码补证后才能进入 Layer 1/2 结论。
+
+更新时优先读取 CLI 输出的影响分类。`NO_IMPACT` 和 `INDEX_ONLY` 不改 `product/`、`developer/`；`KNOWLEDGE_IMPACT` 只审阅列出的 Knowledge ID 与 Eval Case。不要因为结构化索引文件数量多而把它们全部转写成 Markdown。
 
 ## Step 2.3: AI 助手动态链路补证
 
@@ -281,7 +293,7 @@ rg -n "\"[a-zA-Z0-9:_-]+\"" electron src | rg "ipc|invoke|send|handle|channel"
 
 ## Step 3 / 4 / 4.5 — 三层文档生成
 
-详见 [`references/layers.md`](references/layers.md)：Layer 1（Product / PM-QA 视角）、Layer 2（Frontend / 前端 + AI 视角）、稳定 ID/绑定、检索入口与 README 模板。Product/Frontend 每篇 Markdown 必须带语义 frontmatter；`id` 必须匹配 `kb:<manifest.module>:<product|frontend>:<topic>`，`aliases/questions/entities` 均非空，且至少有一条 `verified/ast` 绑定。生成正文后运行 `codewiki index`，完成绑定校验和派生索引；首次生成或结构性更新还要用固定七类问题集运行 `evaluate`，确认 Top-3 命中率、证据召回率与冷/热延迟。生成完成后回到主文件 Step 5。
+详见 [`references/layers.md`](references/layers.md)：Layer 1（Product / PM-QA 视角）、Layer 2（Developer / 研发 + AI 视角）、稳定 ID/绑定、检索入口与 README 模板。Product/Developer 每篇 Markdown 必须带语义 frontmatter；`id` 必须匹配 `kb:<manifest.module>:<product|developer>:<topic>`，`aliases/questions/entities` 均非空，且至少有一条 `verified/ast` 绑定。生成正文后运行 `npx codewiki generate <target> --module <module> --finalize`，统一完成绑定校验、派生索引、证据自检和固定七类 Case 回归。
 
 ## Step 5: 写 Manifest（含 business_terms + coverage_assertions）
 
@@ -290,20 +302,20 @@ rg -n "\"[a-zA-Z0-9:_-]+\"" electron src | rg "ipc|invoke|send|handle|channel"
 - `version: "3.6"`
 - `business_terms`：业务术语翻译白名单（会话给出事实）。Product 层翻译只能用本表。
 - `coverage_assertions`：原 9 个 topic + 字段级溯源/反向索引/结构指纹，共 12 个生成门禁。
-- `layers.frontend.files` 固定为 `01-架构与调用图.md` / `02-变更影响导航.md` / `03-坑点与状态.md`。
+- `layers.developer.files` 固定为 `01-架构与调用图.md` / `02-变更影响导航.md` / `03-坑点与状态.md`；内容按 Source Unit 和语言 Profile 调整。
 - `layers.navigation` 追加 `field-lineage/`、`_intermediate/api-payload-shapes.json` 和带指纹的 `graph-index.json`。
 
 ### coverage_assertions 12 个 topic 判定
 
 | topic | 判 PASS 条件 | 判 N_A 条件 |
 |-------|------------|------------|
-| 核心主链路 | `frontend/01-架构与调用图.md` 含主调用图，product §1 有对应业务全景 | 单文件模块（无跨进程/跨组件链路）|
+| 核心主链路 | `developer/01-架构与调用图.md` 含主调用图，product §1 有对应业务全景 | 单文件模块（无跨进程/跨组件链路）|
 | 用户故事 | product §1 覆盖主成功路径和失败路径 | — |
-| 用户反馈文案 | product §3 或 `frontend/03-坑点与状态.md` 引用 `deep-analysis.json#ui_feedback` | 模块无 UI 反馈代码 |
-| 状态与异常恢复 | `frontend/03-坑点与状态.md` 引 `deep-analysis.json#state_machines` + `#timeout_recovery` | 无状态机且无超时常量 |
-| 分支/类型差异 | `frontend/02-变更影响导航.md` 覆盖主要分支，或 `branch_routes` 无显著分支 | branch_routes 顶层字段全部 < 2 个分支 |
+| 用户反馈文案 | product §3 或 `developer/03-坑点与状态.md` 引用 `deep-analysis.json#ui_feedback` | 模块无 UI 反馈代码 |
+| 状态与异常恢复 | `developer/03-坑点与状态.md` 引 `deep-analysis.json#state_machines` + `#timeout_recovery` | 无状态机且无超时常量 |
+| 分支/类型差异 | `developer/02-变更影响导航.md` 覆盖主要分支，或 `branch_routes` 无显著分支 | branch_routes 顶层字段全部 < 2 个分支 |
 | 实体/关联规则 | Markdown `entities/related/evidence` + `bindings.jsonl` 可交叉定位 | 模块无明显业务实体 |
-| 外部依赖限制 | product §3 或 `frontend/03-坑点与状态.md` 覆盖产品限制 | product_limits 信号为 0 |
+| 外部依赖限制 | product §3 或 `developer/03-坑点与状态.md` 覆盖产品限制 | product_limits 信号为 0 |
 | PRD 影响面 | product §3 列出可数维度且无工时估算 | — |
 | AI 检索入口完整性 | `bindings.jsonl` 中 ID 全部有效，`codewiki_explore` 能返回语义文档与代码证据；`navigation/index.yml` 后备路由可用 | — |
 | 字段级溯源 | `field-lineage/index.json` 存在且 `pending_llm_verification == 0` | 模块无可提取模板字段 |
@@ -319,7 +331,7 @@ manifest 完整模板见 `references/role-templates.md` § 5 和 `references/out
 Layer 1 / Layer 2 全部写完之后，**必须**运行：
 
 ```bash
-codewiki scan <target> .codewiki/modules/<module> --validate
+npx codewiki generate <target> --module <module> --finalize
 ```
 
 ### 验证范围（按事实类型分级）
@@ -370,21 +382,21 @@ ratio    = verified / total       (total > 0)
 
 结果写入 `per_file_confidence[*].confidence_v2`，同步到当前分支 `quality-report-v2.json/knowledge_confidence[]`；`_review.md` 展示缺失 Case、开放 Gap 和综合分。
 
-每次 `--validate` 同时尝试写入 `.codewiki/knowledge-health/<module>/confidence-history.jsonl`。该历史只记录审计结果和源码指纹，不改动知识文档正文；`codewiki confidence` 用于周期任务筛选代码已变更、审计逾期、Gap 多或缺失 Case 多的模块。稳定模块不因时间自动降分，只标记 `review_due`。
+每次 `--validate` 同时尝试写入 `.codewiki/knowledge-health/<module>/confidence-history.jsonl`。该历史只记录审计结果和源码指纹，不改动知识文档正文；`npx codewiki confidence` 用于周期任务筛选代码已变更、审计逾期、Gap 多或缺失 Case 多的模块。稳定模块不因时间自动降分，只标记 `review_due`。
 
 ### `_review.md` 汇总文档（自动生成）
 
 `--validate` 跑完后会在 `.codewiki/modules/<module>/_review.md` 生成模块级健康报告，包含 7 节：
 
-1. **整体评分**（按 product / frontend / quality 等层分组）
+1. **整体评分**（按 product / developer / quality 等层分组）
 2. **按文件细分**（每篇 Layer 1/2 的综合置信度、证据分、场景覆盖、Gap 闭环和扣分点）
 3. **待用户确认 (MUST_CONFIRM)** —— 来自 `manifest.yml/confirmation_checkpoint`
 4. **待业务补充** —— 来自含占位符的位置
 5. **未验证调用链** —— 来自 `navigation/dynamic-flows.md` 的 ⚠️ 标记
 6. **Coverage Assertions Missing** —— 来自 `manifest.yml/coverage_assertions`
-7. **AI 实际检索缺口** —— 来自 `.codewiki/eval-log/*/eval-log.yaml` 中 `retrieval_intents` outcome=`not_found`/`partial` 且 `kb_section` 指向本模块的项，按出现次数排序
+7. **真实检索与 Case** —— 来自 `.codewiki/retrieval.jsonl`、`feedback.jsonl` 与模块 `retrieval-cases.json`：展示可靠命中、候选和缺失问题，以及已评价/未评价和好评/差评数量。可靠命中仅限显式 Case 关联、反馈来源关联或问题完全一致；仅共享同一知识条目不算命中。
 
-第 7 节是**反哺信号**：揭示 AI 跑实战时本模块知识库哪些问题被反复问到却找不到。如果某条 intent 高频但第 4 节静态分析没显示对应位置（`是否同时静态缺失=❌`），说明文档可能写了内容但 AI 检索找不到——需要重写或加索引。
+第 7 节是**反哺信号**：它揭示用户真实问过、但知识库尚不能可靠回答的问题。候选不自动变成 Case；Agent 只能把候选、缺失和差评整理为建议，待用户确认后再补 Case 或修正文档。
 
 `_review.md` 每次 `--validate` 都会重写，**禁止手动编辑**——所有数据来自上游 JSON / YAML 文件，要修改请改源头。
 
@@ -413,20 +425,20 @@ ratio    = verified / total       (total > 0)
 
   基础增量比较逻辑保留 v3.5：`git diff --name-status <base_commit>` 识别 added/modified/deleted/renamed，`git ls-files --others --exclude-standard` 纳入未跟踪；比较口径 `base_commit` 到当前工作区。先把代码增量写入 `navigation/file-graph.json#metadata.incremental`，再读取 `graph-index.json` / 旧 `file-graph.json` 扩展影响集（变更文件、1-2 跳反向依赖、同 IPC/event/store 对端）。只替换影响集文件的出边；只有删除/重命名才删除入边。影响集超过阈值或核心配置变更时自动全量重跑。graph-cluster 和 deep-analyzer 仍全量重跑。
 
-  **Markdown 重写范围必须再经过 bindings 收窄**：把影响集转换为稳定 `nav:*` ID，在 Navigation 图上展开 2 跳，再从 `bindings.jsonl` 反查 `knowledge_id`；只重写这些 ID 对应的 Product/Frontend 文件。若新增代码尚无绑定，只把最邻近的已绑定主题列为候选，不得因此全量重写。完成正文后运行 `codewiki index` 重新校验绑定和缓存。Layer 1/2 仍按四档决定具体章节，最后更新 manifest base_commit。**update 后必须写一条 revision**（详见下文），revision 需标注每个 module 的最终判档等级。
+  **Markdown 重写范围必须再经过 bindings 收窄**：把影响集转换为稳定 `nav:*` ID，在 Navigation 图上展开 2 跳，再从 `bindings.jsonl` 反查 `knowledge_id`；只重写这些 ID 对应的 Product/Developer 文件。若新增代码尚无绑定，只把最邻近的已绑定主题列为候选，不得因此全量重写。完成正文后运行 `npx codewiki generate <target> --module <module> --finalize` 重新校验绑定、缓存与 Case。Layer 1/2 仍按四档决定具体章节，最后更新 manifest base_commit。**update 后必须写一条 revision**（详见下文），revision 需标注每个 module 的最终判档等级。
 - **--update --bugfix**：在 --update 基础上额外生成缺陷深度文件（详见下文）
-- **--rewrite \<layer\>**：navigation 重跑全部脚本；product/frontend 重读 JSON + hub 源码后全量重写
+- **--rewrite \<layer\>**：navigation 重跑全部脚本；product/developer 重读 JSON + hub 源码后全量重写
 - **--patch \<file\>**：不重跑脚本，读现有 JSON + 相关源码，只重写指定文件，保留 `# [manual]` 标记的手动添加内容
 
 ## --bugfix 模式（缺陷深度分析）
 
-`codewiki --update --bugfix` 在常规增量更新之外，额外把缺陷上下文沉淀到 `.codewiki/modules/<module>/quality/defects/`，作为可检索的根因/修复历史。
+`npx codewiki generate --kind defect` 把缺陷上下文沉淀到 `.codewiki/modules/<module>/quality/defects/`，作为可检索的根因/修复历史。
 
 ### 触发方式
 
-- **显式更新**：用户要求把已完成修复沉淀到知识库时，调用 `/codewiki --update --bugfix --id DEF-001`。
+- **显式更新**：用户要求把已完成修复沉淀到知识库时，使用 codewiki-generate Skill，并调用 `npx codewiki generate --kind defect`。
 - **可选更新**：`fe-code-review` 后如果用户确认需要补充缺陷知识库，可传入根因报告、修复证据和 DEF id。
-- 缺失 id 时从最近 `defects.yml` 末尾条目推断；仍无法确认就停下询问。
+- 外部缺陷 ID 不明确时先询问用户；不得自行编造。
 
 ### 输出
 
@@ -443,7 +455,7 @@ ratio    = verified / total       (total > 0)
 ```markdown
 # DEF-001 — <缺陷标题>
 
-> 关联：quality/defects.yml#DEF-001 / commit <hash> / branch <name>
+> 关联：issue <DEF-001> / commit <hash> / branch <name>
 
 ## 缺陷描述
 <现象、影响范围、触发条件>
@@ -475,12 +487,7 @@ ratio    = verified / total       (total > 0)
 
 ### 索引一致性（自检）
 
-`codewiki --validate` 校验：
-
-- `quality/defects.yml` 中每个 entry id 必须在 `quality/defects/<id>-*.md` 存在
-- 反之亦然
-
-不一致时输出 **WARN**（不 FAIL），允许历史缺陷暂无深度文件，但必须在 `validation-report.json#defects_index_warnings` 列出。
+`npx codewiki generate` 校验 quality 文档的稳定 `kb:*` ID、非空 aliases/questions/entities、typed `sources`，并要求 defect 至少包含 code、commit 或 test 证据。`--finalize` 同时校验正文中的 `file:line`。
 
 ## --update 收尾：写 revision
 
@@ -494,7 +501,7 @@ revision 字段：
 | to | 新 base_commit / 新关键规则 |
 | evidence | 触发本次 update 的 diff 摘要、关联澄清/计划文档 |
 | commit | 新 base_commit hash；工作区未提交时写 `working-tree` |
-| updated_files | 本次 update 改写的 product/frontend/navigation/manifest 文件清单 |
+| updated_files | 本次 update 改写的 product/developer/navigation/manifest 文件清单 |
 | related_defects | 关联缺陷 id（`--bugfix` 模式必填）；其它情况写"无" |
 
 revision 文件名：`<YYYY-MM-DD>-<branch>-<topic>.md`，topic 由本次 update 主导意图决定（bug-fix 模式下用 DEF id；普通 update 用 hub 文件名或 commit subject 关键词）。
@@ -505,7 +512,7 @@ revision 文件名：`<YYYY-MM-DD>-<branch>-<topic>.md`，topic 由本次 update
 
 迁移遵循以下边界：
 
-- 将 v3.5 Product/Frontend 视为事实基线和主要输入，保留已有业务知识与人工修订；不要根据源码从零重写。
+- 将 v3.5 Product/Frontend 视为事实基线和主要输入，迁移到 Product/Developer 时保留已有业务知识与人工修订；不要根据源码从零重写。
 - 根据源码 fingerprint 与产物 schema 复用 Navigation；只补跑缺失或不兼容的分析阶段。
 - 在 `.codewiki/modules/<module>.v36-stage/` 旁路生成，旧模块在验证完成前保持可用。
 - 补齐稳定 `kb:*` ID、`aliases/questions/entities` 与 `bindings.jsonl`，无法归类的旧事实进入“迁移待确认”，不能静默丢弃。
@@ -518,7 +525,7 @@ revision 文件名：`<YYYY-MM-DD>-<branch>-<topic>.md`，topic 由本次 update
 
 1. **所有文档必须中文**，技术术语（函数名、文件路径、枚举值）保留英文
 2. **每个文档首段必须是 `> 提要：...`**——1-3 句话说明内容范围和阅读对象
-3. **Frontend 文档必须有 v3.6 一行元数据头**（Summary / 适合读 / 不适合读 / 证据入口）
+3. **Developer 文档必须有一行元数据头**（Summary / 适合读 / 不适合读 / 证据入口）
 4. **Product 文档 §1 §3 正文严禁出现技术细节散落**（函数名/IPC/毫秒/路径/英文状态名），全部下沉到尾部"技术证据索引"；**§2 字段级页面逻辑允许接口原始字段名**（因为它是产品需要的双列展示：组件字段名 vs 接口原始字段名）
 5. **业务术语翻译必须经 Step 2.9 确认**——不在 `manifest.business_terms` 中的术语，必须通过 Step 2.9 确认检查点收集并等待用户确认；严禁在文档中直接写"待业务确认"占位符
 6. **严禁工时估算**——PRD 影响面只输出可数维度（页面数/接口数/状态数/外部依赖数），禁止出现小时/天/人天/sprint/工时/周等估时词
@@ -536,15 +543,15 @@ revision 文件名：`<YYYY-MM-DD>-<branch>-<topic>.md`，topic 由本次 update
 17. 按权重优先级文档化：main flow 优先
 18. 动态链路必须由 AI 助手读码补证，覆盖发起方 → 中间封装/桥接 → 接收方/handler → 业务函数或副作用；Electron IPC 只是可选 profile
 19. 多入口/多模块必须拆分 target 执行
-20. 目录结构：Layer 1 = `product/`，Layer 2 = `frontend/`，Layer 3 = `navigation/`
+20. 目录结构：Layer 1 = `product/`，Layer 2 = `developer/`，Layer 3 = `navigation/`
 21. Step 1.2 候选入口审阅不可省略；用户只给业务意图时，必须等用户确认后才执行 AST
 22. Step 1.5 范围扩展不可跳过——即使 target 看起来完整，仍需执行反向追踪验证
 23. **Step 2.6 候选行为信号不可跳过**——5 个行为视角保留在 `deep-analysis.json` 对应 section（无信号时空数组）；默认生成 `_intermediate/api-payload-shapes.json`，不再复制独立行为 JSON 或 `data-shapes.json`
 24. Step 2.8 活跃度验证不可跳过——废弃代码必须在所有文档中明确标记
 25. **Step 2.9 待确认项收集与审阅不可跳过**——生成 Layer 1/2 前必须先收集确认项（业务术语翻译、业务流命名）；MUST_CONFIRM 项必须停下等待用户确认；CAN_POSTPONE 项写入 `navigation/pending-confirmations.yml`
-25a. **Step 3 / Step 4 必须块级交互生成**——Product 三大块一次对齐，Frontend 三文件一次对齐；均按 Phase A（生成前确认）→ Phase B（生成）→ Phase C（回顾）推进
+25a. **Step 3 / Step 4 必须块级交互生成**——Product 三大块一次对齐，Developer 当前 profile 的三文件一次对齐；均按 Phase A（生成前确认）→ Phase B（生成）→ Phase C（回顾）推进
 25b. **遇到疑点必须提供选项**——证据不充分、含义模糊、归类不清时，提供 2-3 个理解选项 + "我来补充" 入口给用户，不要靠"待业务确认"占位符填补
-26. **检索绑定必须可用**——`navigation/bindings.jsonl` 中所有 `knowledge_id` / `navigation_id` 必须存在；`codewiki_explore` 是 AI 助手主入口，`navigation/index.yml` 必须存在但仅作无 MCP 后备
+26. **检索绑定必须可用**——`navigation/bindings.jsonl` 中所有 `knowledge_id` / `navigation_id` 必须存在；codewiki-query Skill 是用户主入口，`navigation/index.yml` 必须存在但仅作文本后备
 27. **`coverage_assertions` 12 个 topic 必须填全**——MISSING/PARTIAL 项要给出 reason
 28. 扩展范围的证据必须记录在 manifest.yml 的 expansion_reason 中
 29. 废弃动态通道和废弃 API 必须在 dynamic-flows.md（Electron 项目可补 ipc-flows.md）、`03-坑点与状态.md` 和对应 flow 文件中同时标记
@@ -556,13 +563,15 @@ revision 文件名：`<YYYY-MM-DD>-<branch>-<topic>.md`，topic 由本次 update
 35. **v3.6 --update 模式按四档判档**——NONE/STRUCTURAL/FIELD_ONLY/COSMETIC，判档结果必须写入 revision（详见"--update 收尾：写 revision"）
 
 
-## 检索反馈闭环（/wiki-explore）
+## 检索反馈闭环（codewiki-query Skill）
 
-知识库的可信度来自真实使用的反哺，`/wiki-explore` 指令（由 `codewiki init` 安装到 `.claude/commands/`）执行以下闭环：
+知识库的可信度来自真实使用的反哺；`npx codewiki init` 会把同一份 codewiki-query Skill 安装到 Claude Code 和 Codex：
 
-1. **检索**：Agent 调用 `codewiki_explore`（或降级 `codewiki query`），命中记录自动写入 `.codewiki/retrieval.jsonl`（含 retrieval_id、命中 knowledge/evidence id、延迟）
-2. **评级**：回答后 Agent 必须邀请用户评级；评级通过 `codewiki feedback record --rating good|bad` 写入 `.codewiki/feedback.jsonl`
-3. **差评反哺**：评价不好时，Agent 梳理本轮对话、读源码补证，向用户列出可增补的知识点（每条必须 `file:line` 证据）；用户确认后 `codewiki case add` 写入 `.codewiki/knowledge-overlay/<module>.jsonl`（source=user，参与场景覆盖计分），重跑 `codewiki index` 立即可检索
-4. **度量**：`codewiki confidence` 汇总证据分（50%）+ 场景覆盖（30%，含 user case）+ Gap 闭环（20%，未命中与差评构成 Gap）
+1. **检索**：codewiki-query Skill 调用 codewiki MCP 的 `codewiki_explore`，命中记录自动写入 `.codewiki/retrieval.jsonl`（含 retrieval_id、命中 knowledge/evidence id、延迟）
+2. **评级**：回答后 Agent 必须邀请用户评级；评级通过 `npx codewiki query --feedback good|bad --retrieval-id ...` 写入 `.codewiki/feedback.jsonl`
+3. **Gap**：结构化未命中或 bad 评级打开稳定 Gap；同一模块、归一化问题和类型生成相同 ID
+4. **差评反哺**：Agent 读源码补证并向用户展示修正内容；确认后用 `npx codewiki generate --gap-id ...` 写入共享 quality Markdown
+5. **回归闭环**：generate 自动新增共享 Case、重建索引并回归；只有关联 Case 通过，Gap 才关闭
+6. **度量**：codewiki-review Skill 调用内部置信报告，汇总证据、真实问题 Case 覆盖、回归、用户反馈和 Gap
 
-本地浏览：`codewiki preview` 把 `.codewiki/modules/` 渲染成交互式 HTML 站点（模块总览、评级徽章、全文搜索、折叠章节、mermaid 图）并自动打开浏览器。
+本地浏览：codewiki-review Skill 把 `.codewiki/modules/` 渲染成交互式 HTML 站点（模块总览、评级徽章、全文搜索、折叠章节、mermaid 图）。

@@ -1,6 +1,6 @@
 # role-templates.md — codewiki v3.6 角色化文档模板
 
-本文件定义 codewiki 产物的固定模板：README（总入口）、Product 层（3 大块）、Frontend 层（3 文件）、Navigation 层（AI/工具）。
+本文件定义 codewiki 产物的固定模板：README（总入口）、Product 层（3 大块）、Developer 层（通用 3 文件）、Navigation 层（AI/工具）。
 
 SKILL.md 在 Step 3/4/5 引用本文件，不在 SKILL.md 内重复模板细节。
 
@@ -34,21 +34,21 @@ evidence: []
 ## 角色阅读路径
 | 角色 | 先读 | 跳过 | 重点关注 |
 |------|------|------|----------|
-| PM/业务 | `product/*-flow.md` §1 §2 | `frontend/`, `navigation/` | 业务全景 + 字段级页面逻辑 |
-| QA | `product/*-flow.md` §3 改动决策卡 | `frontend/02-*` | 异常路径、边界条件、不可承诺项 |
-| 前端（新人）| `frontend/01-架构与调用图` → `03-坑点与状态` | `product/` | 主链路、状态归属、外部依赖 |
-| 前端（变更评估）| `frontend/02-变更影响导航` + `field-lineage/reverse-index.json` | 其余 | 上下游影响、复用清单、核心链路 |
+| PM/业务 | `product/*-flow.md` §1 §2 | `developer/`, `navigation/` | 业务全景 + 字段级页面逻辑 |
+| QA | `product/*-flow.md` §3 改动决策卡 | `developer/02-*` | 异常路径、边界条件、不可承诺项 |
+| 研发（新人）| `developer/01-架构与调用图` → `03-坑点与状态` | `product/` | 主链路、状态归属、外部依赖 |
+| 研发（变更评估）| `developer/02-变更影响导航` + `field-lineage/reverse-index.json` | 其余 | 上下游影响、复用清单、核心链路 |
 | AI/工具 | `codewiki_explore`（后备：`navigation/index.yml`） | 无需手工遍历全部产物 | 语义答案 + 代码证据链 |
 
 ## 常见任务入口
 | 任务 | 推荐起点 |
 |------|---------|
 | 写新 PRD | `product/<flow>-flow.md` §3 改动决策卡 |
-| 评估改动影响 | `frontend/02-变更影响导航.md` + `field-lineage/reverse-index.json` |
+| 评估改动影响 | `developer/02-变更影响导航.md` + `field-lineage/reverse-index.json` |
 | 查字段来源 | `field-lineage/pages/<page-id>.json` |
 | 查接口影响面 | `field-lineage/reverse-index.json` |
-| 查接口/IPC | `frontend/01-架构与调用图.md` § 接口清单 |
-| 排查异常/超时 | `frontend/03-坑点与状态.md` + `navigation/deep-analysis.json#timeout_recovery` |
+| 查接口/IPC | `developer/01-架构与调用图.md` § 接口清单 |
+| 排查异常/超时 | `developer/03-坑点与状态.md` + `navigation/deep-analysis.json#timeout_recovery` |
 | 补知识库 | 重跑 `/codewiki <path> --update` |
 
 ## 文档可信状态
@@ -63,7 +63,7 @@ evidence: []
 
 ## AI 索引入口
 - `codewiki_explore` — 主检索入口：语义文档 → 代码图 → 关联文档
-- `navigation/index.yml` — 无 MCP 时的文本检索后备路由
+- `navigation/index.yml` — 内部查询不可用时的文本检索后备路由
 - `navigation/bindings.jsonl` — 语义文档与代码证据绑定
 - `field-lineage/pages/<page-id>.json` — 字段级溯源（v3.6 核心）
 - `field-lineage/reverse-index.json` — 接口 → 字段反查
@@ -84,7 +84,7 @@ title: "<用户会使用的业务流名称>"
 aliases: ["<按钮/菜单文案>", "<业务同义词>"]
 questions: ["<这个按钮是怎么工作的>", "<该流程失败时用户会看到什么>"]
 entities: ["<业务实体>"]
-related: [kb:<module>:frontend:<topic>]
+related: [kb:<module>:developer:<topic>]
 evidence:
   - id: nav:<kind>:<stable-key>
     role: entry
@@ -210,13 +210,15 @@ evidence:
 4. 若 field.editable 在 col1 后加 ' ✏️'
 ```
 
-## 3. Frontend 层 — 3 文件模板（v3.6 从 6 文件重构）
+## 3. Developer 层 — 通用 3 文件模板
+
+单前端模块使用组件、状态和字段血缘组织；多语言模块保持同样的 3 个阅读入口，但必须补充 Source Unit 边界、前端请求 → 后端 Endpoint → Service/Repository 的跨端链路，以及不同语言的变更影响。不要按 `frontend/`、`backend/` 再拆顶层目录。
 
 每篇一行元数据头（v3.6 新格式，替代原 6 行）：
 
 ```markdown
 ---
-id: kb:<module>:frontend:<topic>
+id: kb:<module>:developer:<topic>
 kind: technical
 title: "<技术主题>"
 aliases: ["<组件/模块别名>"]
@@ -237,7 +239,7 @@ evidence:
 必含章节（合并原 01 架构总览 + 02 组件地图 + 03 接口通信）：
 
 ```markdown
-> 何时来读：新接手模块 / 需要看整体架构 / 查跨进程通信；先读：无；证据：navigation/file-graph.json + component-refs.json + liveness.json
+> 何时来读：新接手模块 / 需要看整体架构 / 查跨端通信；先读：无；证据：navigation/source-units.json + framework-facts.json + graph.jsonl
 
 ## 模块概览
 <3-5 行说明技术定位>
@@ -246,12 +248,12 @@ evidence:
 <Mermaid，跨进程时必须画>
 
 ## 核心目录结构
-<主要目录 + 职责一句话>
+<Source Unit / 主要目录 + 语言框架版本 + 职责一句话>
 
-## 关键组件职责表（Hub 优先）
-| 组件 | 引用数 | 职责 | Hub | 数据聚合算法引用 |
-|------|-------|------|-----|-----------------|
-| <name> | <N> | <一句话> | ✓/– | 见 field-lineage/pages/<page-id>.json § computed |
+## 关键实现单元职责表
+| Source Unit | 类型 | 关键组件/服务 | 职责 | 上下游 |
+|-------------|------|--------------|------|--------|
+| <name> | Vue/React/Spring/Go | <组件/Controller/Handler/Service> | <一句话> | <调用关系> |
 
 （原 v3.5 § 全局布局组件独立成段 + § 数据聚合算法 已挪至 field-lineage 产物；此处只列跳转链接）
 
@@ -260,6 +262,7 @@ evidence:
 
 ### 场景 <N>：<业务名>
 - **HTTP**：<method endpoint> — <一句话>（active/deprecated）
+- **跨语言实现**：<调用方> → <Endpoint> → <Handler/Service>
 - **WS**：<event> — <触发方>
 - **IPC**：<channel> — <方向>
 - 时序图：<mermaid，含失败路径>
@@ -340,7 +343,7 @@ evidence:
 <Mermaid，只画核心 flow 的完整时序>
 ```
 
-### Frontend 层硬约束
+### Developer 层硬约束
 
 - 每篇必须一行元数据头
 - 每个"结论"必须带 `file:line` 证据
@@ -351,11 +354,11 @@ evidence:
 
 ## 4. Navigation 层 — bindings + index.yml 后备模板
 
-主入口是 `codewiki_explore`；`.codewiki/modules/<module>/navigation/index.yml` 仅供 MCP 不可用时的正则检索。
+主入口是 codewiki-query Skill；`.codewiki/modules/<module>/navigation/index.yml` 仅供内部查询不可用时的正则检索。
 
 ```yaml
 version: "1.1"
-purpose: "codewiki_explore 不可用时的文本检索后备路由"
+purpose: "codewiki 内部查询不可用时的文本检索后备路由"
 
 query_routes:
   # v3.6 新增
@@ -484,7 +487,7 @@ coverage_assertions:
 
 layers:
   product: { flow_count: N, files: [...] }
-  frontend: { file_count: 3, files: [...] }
+  developer: { file_count: 3, files: [...] }
   navigation: { core_json_count: N, field_lineage_pages: N }
 liveness: { ... }
 ```

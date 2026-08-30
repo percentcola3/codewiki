@@ -13,7 +13,7 @@
 | 字段 | 说明 |
 |------|------|
 | path | 候选文件或目录 |
-| role | page-entry / route / global-component / layout / composable / ipc-caller / ws-subscriber / api-caller 等 |
+| role | page-entry / route / component / controller / service / repository / handler / rpc / api-caller 等 |
 | confidence | high / medium / low |
 | reason | 为什么认为它与本次扫描强相关 |
 | planned_action | include / exclude / pending |
@@ -26,6 +26,7 @@
 - 候选入口不止一个，或多个入口边界接近
 - 关键入口位于 page 目录之外
 - 存在明显的跨目录 IPC / API / WebSocket / store / composable 链路
+- 同一业务模块横跨多个 Workspace、语言或部署单元
 - 最近同类模块出现过漏扫或范围判断偏差
 
 只有用户明确授权“你判断后直接执行”，且候选入口为 high confidence、单一边界，才允许自动通过。自动通过时仍必须输出入口采纳理由，并写入 manifest。
@@ -42,6 +43,16 @@
 
 ```yaml
 target_dirs: [render/pages/printer]
+source_units:
+  - name: printer-web
+    path: render/pages/printer
+    language: typescript
+    framework: vue
+    framework_version: "3.5.1"
+  - name: printer-service
+    path: services/printer
+    language: java
+    framework: spring
 entry_review:
   mode: user-confirmed
   summary: "初始 target 外另发现全局打印任务入口，用户确认纳入后再继续扫描"
@@ -75,6 +86,8 @@ entry_review:
 3. **WebSocket / event bus / BroadcastChannel**：追踪生产者、消费者、订阅注册和补偿逻辑
 4. **组件引用**：找全局组件、布局组件、slot 入口和跨目录业务组件
 5. **Store/Composable**：找到定义文件和关键消费者，区分核心链路和共享工具
+6. **后端入口**：从 HTTP/RPC/消息契约追踪 Controller/Handler、Service、Repository 和下游服务
+7. **跨语言契约**：使用 HTTP Method + 标准化 Path、RPC Service + Method、消息 Topic 关联 Source Units；模糊匹配只能作为 candidate
 
 ### 筛选规则
 
@@ -112,4 +125,3 @@ expansion_reason:
 - target 中每个 IPC 方法的调用者至少有一个被覆盖
 - target 中每个 API 函数的调用者至少有一个被覆盖
 - 扩展后的文件列表中不包含无关模块的文件
-

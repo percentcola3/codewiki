@@ -7,11 +7,11 @@
 满足以下条件时按 v3.5 迁移处理：
 
 - `.codewiki/modules/<module>/manifest.yml#version` 不为 `3.6`；并且
-- Frontend 仍包含 `01-架构总览-README.md`、`02-组件地图-component-map.md` 等 v3.5 命名，或 Navigation 缺少 v3.6 的 `field-lineage/`。
+- 旧 Frontend 仍包含 `01-架构总览-README.md`、`02-组件地图-component-map.md` 等 v3.5 命名，或 Navigation 缺少 v3.6 的 `field-lineage/`。
 
 先只读收集：
 
-- Product/Frontend 文件、标题、章节、正文 hash、人工修改痕迹和 `file:line`；
+- Product/Frontend 旧文件、标题、章节、正文 hash、人工修改痕迹和 `file:line`；
 - manifest 的 target、base_commit、coverage_assertions；
 - Navigation 文件的 schema、metadata、源码 fingerprint 和证据引用；
 - 现有固定问题集；没有时，从旧文档生成覆盖七类问题的迁移评测集，但答案必须来自旧文档或代码证据。
@@ -43,19 +43,19 @@
 按“先保留、再归类、最后补充”的顺序转换：
 
 1. 复制旧事实和证据，记录每个旧章节到新章节的映射与内容 hash。
-2. 为 Product/Frontend 文档生成稳定 ID：`kb:<manifest.module>:<product|frontend>:<topic>`。topic 优先来自旧文件业务主题；发布后不随文件名变化。
+2. 将旧 Frontend 内容迁入 Developer，并为 Product/Developer 文档生成稳定 ID：`kb:<manifest.module>:<product|developer>:<topic>`。topic 优先来自旧文件业务主题；发布后不随文件名变化。
 3. 从旧标题、按钮文案、领域名词和真实问法补齐 `aliases/questions/entities`，不要改写原事实来迎合关键词。
 4. 补充内容必须带旧知识引用或代码证据；源码无法证明的业务规则保持原文并标记来源为 `migrated-v35`。
 5. 无法无损归类的内容放入目标文档的“迁移待确认”章节，并写入 `unmapped_facts`，禁止静默省略或概括掉约束条件。
 
-Frontend 六文件到三文件的默认映射：
+旧 Frontend 六文件到 Developer 三文件的默认映射：
 
 | v3.5 内容 | v3.6 目标 |
 |---|---|
-| 架构总览、组件地图、数据流主链路 | `frontend/01-架构与调用图.md` |
-| 组件改动索引、调用影响、字段入口 | `frontend/02-变更影响导航.md` |
-| 状态时序、异常恢复、坑点、兼容边界 | `frontend/03-坑点与状态.md` |
-| 无法判断归属的章节 | `frontend/03-坑点与状态.md#迁移待确认` |
+| 架构总览、组件地图、数据流主链路 | `developer/01-架构与调用图.md` |
+| 组件改动索引、调用影响、字段入口 | `developer/02-变更影响导航.md` |
+| 状态时序、异常恢复、坑点、兼容边界 | `developer/03-坑点与状态.md` |
+| 无法判断归属的章节 | `developer/03-坑点与状态.md#迁移待确认` |
 
 Product 继续按业务流组织。不要为了减少文件数合并不同业务流，也不要把人工确认事实改写成源码推断。
 
@@ -85,14 +85,12 @@ Product 继续按业务流组织。不要为了减少文件数合并不同业务
 在旁路模块上执行严格构建：
 
 ```bash
-codewiki index \
-  --project <project-root> \
-  --module .codewiki/modules/<module>.v36-stage
+npx codewiki generate <target> --module <module> --finalize
 ```
 
 必须满足：
 
-- 所有 Product/Frontend 文档具有稳定 ID 和非空语义字段；
+- 所有 Product/Developer 文档具有稳定 ID 和非空语义字段；
 - 每篇文档至少存在一条 `verified/ast` 代码绑定；纯业务事实无法绑定时，保留迁移来源并进入待确认清单，不伪造代码证据；
 - `bindings.jsonl` 不含悬空 Knowledge ID、Navigation ID 或非法枚举；
 - 每个旧章节都存在目标映射，或明确列在 `unmapped_facts`。
@@ -124,7 +122,7 @@ codewiki index \
 
 ```gitignore
 .codewiki/modules/*/.archive/
-.codewiki/modules/.*.v36-stage/
+.codewiki/modules/*.v36-stage/
 .codewiki/codewiki-migration/
 ```
 

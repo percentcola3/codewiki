@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { calculateKnowledgeConfidence, deriveNavigationCases, gradeFromScore } from '../src/scan/knowledge-confidence.mjs'
 import { assessModuleConfidence } from '../src/confidence.mjs'
+import { openGap } from '../src/quality-state.mjs'
+import { buildUsageReport } from '../src/report.mjs'
 
 test('gradeFromScore maps score bands to grades', () => {
   assert.equal(gradeFromScore(0.95), 'A')
@@ -28,6 +30,22 @@ test('deriveNavigationCases produces deterministic branch/state/timeout cases', 
     'timeout:retryPay',
   ])
   assert.ok(cases.every(item => item.source === 'deterministic'))
+})
+
+test('deriveNavigationCases includes backend endpoints and verified cross-language HTTP chains', () => {
+  const cases = deriveNavigationCases({
+    frameworkFacts: {
+      data: {
+        nodes: [
+          { id: 'nav:api', type: 'api-call', method: 'POST', route: '/api/orders' },
+          { id: 'nav:endpoint', type: 'endpoint', method: 'POST', route: '/api/orders' },
+        ],
+        edges: [{ from: 'nav:api', to: 'nav:endpoint', type: 'calls-endpoint', confidence: 1 }],
+      },
+    },
+  })
+  assert.ok(cases.some(item => item.id === 'endpoint:POST:/api/orders'))
+  assert.ok(cases.some(item => item.id === 'cross-http:POST:/api/orders'))
 })
 
 test('calculateKnowledgeConfidence weights evidence/scenario/gap as 50/30/20', () => {
@@ -88,6 +106,7 @@ test('assessModuleConfidence combines validation report, doc coverage and retrie
       { at, query: '退款什么情况下允许', module: 'orders', modules: ['orders'], found: false, fallback: true, stale: false, latency_ms: 3 },
       { at, query: '不相关的问题', module: 'other', modules: ['other'], found: false, fallback: false, stale: false, latency_ms: 1 },
     ]
+    openGap(projectRoot, { module: 'orders', query: '退款什么情况下允许', kind: 'retrieval_miss' })
     const assessment = assessModuleConfidence(projectRoot, { dir: moduleDir, name: 'orders' }, traces, [], 30)
     assert.equal(assessment.evidence.evidenceScore, 0.9)
     assert.equal(assessment.scenario_coverage.applicable, 2)
@@ -96,7 +115,53 @@ test('assessModuleConfidence combines validation report, doc coverage and retrie
     assert.equal(assessment.retrieval_usage.found_rate, 0.5)
     assert.equal(assessment.gap_closure.discovered >= 1, true)
     assert.ok(['A', 'B', 'C', 'D', 'E'].includes(assessment.overall_confidence.grade))
-    assert.equal(assessment.overall_confidence.policy, 'codewiki-confidence-v1')
+    assert.equal(assessment.overall_confidence.policy, 'codewiki-confidence-v2')
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true })
+  }
+})
+
+test('usage report only counts explicit or exact Case mappings as reliable coverage', () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'codewiki-usage-'))
+  try {
+    const moduleDir = join(projectRoot, '.codewiki', 'modules', 'orders')
+    mkdirSync(moduleDir, { recursive: true })
+    writeFileSync(join(moduleDir, 'manifest.yml'), 'module: orders\n')
+    writeFileSync(join(moduleDir, 'retrieval-cases.json'), JSON.stringify({ cases: [
+      {
+        id: 'eval:orders:refund', status: 'active', module: 'orders', query: '什么情况下允许退款',
+        expected_knowledge_ids: ['kb:orders:product:refund'], source: 'curated', created_at: new Date().toISOString(),
+      },
+      {
+        id: 'eval:orders:coupon', status: 'active', module: 'orders', query: '优惠券怎么叠加',
+        expected_knowledge_ids: ['kb:orders:product:coupon'], source: 'feedback', source_ref: 'ret_feedback', created_at: new Date().toISOString(),
+      },
+    ] }, null, 2))
+    const at = new Date().toISOString()
+    mkdirSync(join(projectRoot, '.codewiki'), { recursive: true })
+    writeFileSync(join(projectRoot, '.codewiki', 'retrieval.jsonl'), [
+      { retrieval_id: 'ret_exact', at, query: '什么情况下允许退款', module: 'orders', found: true, knowledge_ids: ['kb:orders:product:refund'] },
+      { retrieval_id: 'ret_feedback', at, query: '优惠券什么时候能用', module: 'orders', found: true, knowledge_ids: ['kb:orders:product:coupon'] },
+      // 同样命中退款知识，但问题无关，不能因 Knowledge 重叠被误判为 Case 命中。
+      { retrieval_id: 'ret_shared_doc', at, query: '订单列表如何排序', module: 'orders', found: true, knowledge_ids: ['kb:orders:product:refund'] },
+      { retrieval_id: 'ret_candidate', at, query: '什么情况下允许退款啊', module: 'orders', found: true, knowledge_ids: [] },
+    ].map(item => JSON.stringify(item)).join('\n') + '\n')
+    writeFileSync(join(projectRoot, '.codewiki', 'feedback.jsonl'), `${JSON.stringify({ at, retrieval_id: 'ret_shared_doc', query: '订单列表如何排序', module: 'orders', rating: 'bad' })}\n`)
+
+    const report = buildUsageReport(projectRoot, { module: 'orders', days: 30 })
+    assert.equal(report.case_coverage.matched, 2)
+    assert.equal(report.case_coverage.candidate, 1)
+    assert.equal(report.case_coverage.missing, 1)
+    assert.deepEqual(report.case_coverage.matched_queries.map(item => [item.retrieval_id, item.reason]), [
+      ['ret_exact', 'exact'],
+      ['ret_feedback', 'explicit'],
+    ])
+    assert.equal(report.feedback.rated_queries, 1)
+    assert.equal(report.feedback.unrated_queries, 3)
+    assert.equal(report.case_assets.by_source.curated, 1)
+    assert.equal(report.case_assets.by_source.feedback, 1)
+    assert.equal(report.case_assets.smoke_cases, 0)
+    assert.ok(report.optimization_candidates.some(item => item.query === '订单列表如何排序' && item.bad_feedback))
   } finally {
     rmSync(projectRoot, { recursive: true, force: true })
   }

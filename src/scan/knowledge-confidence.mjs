@@ -99,7 +99,7 @@ function branchValues(branches) {
   return []
 }
 
-export function deriveNavigationCases({ branchRoutes = {}, stateMachines = {}, timeoutRecovery = {} } = {}) {
+export function deriveNavigationCases({ branchRoutes = {}, stateMachines = {}, timeoutRecovery = {}, frameworkFacts = {} } = {}) {
   const cases = []
   for (const route of branchRoutes.routes || []) {
     for (const branch of branchValues(route.branches)) {
@@ -123,6 +123,18 @@ export function deriveNavigationCases({ branchRoutes = {}, stateMachines = {}, t
   for (const handler of timeoutRecovery.handlers || []) {
     const name = handler?.name || handler?.handler || handler
     if (name) cases.push({ id: `timeout:${name}`, source: 'deterministic', verified: false })
+  }
+  const factNodes = frameworkFacts?.data?.nodes || []
+  const factEdges = frameworkFacts?.data?.edges || []
+  const nodesById = new Map(factNodes.map(node => [node.id, node]))
+  for (const endpoint of factNodes.filter(node => node.type === 'endpoint' && node.method && node.route)) {
+    cases.push({ id: `endpoint:${endpoint.method}:${endpoint.route}`, source: 'deterministic', verified: false })
+  }
+  for (const edge of factEdges.filter(item => item.type === 'calls-endpoint' && Number(item.confidence || 0) >= 0.9)) {
+    const endpoint = nodesById.get(edge.to)
+    if (endpoint?.method && endpoint?.route) {
+      cases.push({ id: `cross-http:${endpoint.method}:${endpoint.route}`, source: 'deterministic', verified: false })
+    }
   }
   return uniqueById(cases)
 }

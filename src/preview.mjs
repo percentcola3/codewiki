@@ -29,7 +29,12 @@ export async function runPreview(options = {}) {
     process.stderr.write(`[codewiki] ${error.message}\n`)
     return 1
   }
-  const siteDir = join(projectRoot, '.codewiki', 'site')
+  const siteDir = site.outDir
+  if (options.export === true) {
+    process.stdout.write(`[codewiki] 静态知识站点已生成：${siteDir}\n`)
+    process.stdout.write(`[codewiki] ${site.modules.length} 个模块：${site.modules.map(m => `${m.name}(${m.docs} 篇/${m.grade})`).join('、')}\n`)
+    return 0
+  }
   const port = options.port == null ? 4173 : Number(options.port)
 
   const server = createServer((request, response) => {

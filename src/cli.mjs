@@ -1,83 +1,102 @@
 #!/usr/bin/env node
 // codewiki CLI — command dispatch + AST scan pipeline orchestration.
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { existsSync } from 'node:fs'
+import { basename, dirname, join, relative, resolve } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
-import { buildProjectIndex, evaluateKnowledgeBase, exploreKnowledgeBase, formatExploreResult, MODULES_ROOT } from './scan/knowledge-retrieval.mjs'
+import { buildProjectIndex, compileUnifiedGraph, evaluateKnowledgeBase, exploreKnowledgeBase, formatExploreResult, moduleDirs } from './scan/knowledge-retrieval.mjs'
 import { runConfidence } from './confidence.mjs'
-import { runInit } from './init.mjs'
+import { runInit, runUninstall, runUpgrade } from './init.mjs'
 import { runPreview } from './preview.mjs'
-import { renderSite } from './site.mjs'
-import { runFeedback, runCaseAdd } from './feedback.mjs'
+import { runFeedback, runKnowledgeAdd } from './feedback.mjs'
+import { knowledgeRootRelative, statePath } from './config.mjs'
+import { loadEvalCases, recordEvaluationRun, runEvalAdd } from './report.mjs'
+import { appendJsonl, createRetrievalId, openGap } from './quality-state.mjs'
+import { discoverSourceUnits, isFrontendSourceUnit, sourceUnitSummary } from './scan/source-units.mjs'
+import { classifyGeneratedImpact } from './generation/impact.mjs'
+import {
+  assertGenerationUnchanged,
+  assertKnowledgeImpactReviewed,
+  beginGenerationTransaction,
+  completeGenerationTransaction,
+  rollbackGenerationTransaction,
+  updateGenerationTransaction,
+} from './generation/transaction.mjs'
 
 const SCAN_DIR = join(dirname(fileURLToPath(import.meta.url)), 'scan')
 
-const usage = `codewiki — 前端仓库知识库 CLI
+const usage = `codewiki — 把前后端代码沉淀为可检索的业务知识
 
 用法:
-  codewiki init [--project <root>]
-      初始化：安装 /wiki-scan、/wiki-explore 指令，注册 MCP，下发工作流文档
-  codewiki scan <target> [--output ${MODULES_ROOT}/<module>] [--incremental]
-      运行 AST 六阶段管线，产出 <module>/navigation/ 结构化代码图
-  codewiki scan <target> <output-dir> --validate
-      只跑证据自检（引用 file:line 校验 + 逐文件置信评分）
-  codewiki index [--module <name>] [--json]
-      构建检索索引（语义文档 + bindings + 导航图），写入 .codewiki/cache/
-  codewiki query "<问题>" [--module <name>] [--detail semantic|evidence] [--json]
-      检索知识库，返回语义文档与 file:line 代码证据
-  codewiki evaluate --cases <file.json> [--repeat N] [--output <file>]
-      用固定问题集评估检索质量（Top-3 命中率 / 证据召回率 / 冷热延迟）
-  codewiki confidence [--module <name>] [--days 30] [--json]
-      汇总证据分、场景覆盖、检索命中与用户评级，输出模块置信度评级
-  codewiki feedback record --rating good|bad --query "..." [--module M] [--retrieval-id ID] [--comment "..."]
-      记录 wiki-explore 回答的用户评级（写入 .codewiki/feedback.jsonl）
-  codewiki case add --module M --title "..." --question "..." --answer "..." --evidence <file:line> [--unverified]
-      增补用户确认的知识（写入 .codewiki/knowledge-overlay/，index 后可检索）
-  codewiki site [--module <name>]
-      渲染交互式 HTML 站点到 .codewiki/site/
-  codewiki preview [--port 4173] [--no-open] [--module <name>]
-      渲染站点并启动本地服务器，自动打开浏览器
-  codewiki mcp
-      启动 stdio MCP Server（工具 codewiki_explore），供 AI Agent 接入
+  npx codewiki init [--project <root>]
+      安装 Claude Code/Codex Skills 与 MCP，初始化共享知识和本地状态
+  npx codewiki upgrade [--project <root>]
+      升级 Skills、工作流和项目集成，不覆盖团队说明与知识资产
+  npx codewiki uninstall [--project <root>]
+      移除项目集成，保留配置、团队说明与知识资产
 
-环境变量:
-  CODEWIKI_PROJECT_ROOT   MCP/检索默认项目根目录（默认当前目录）`
+初始化后，在 Claude Code 或 Codex 中直接说：
+  “为订单模块生成知识库”
+  “订单退款需要满足什么条件？”
+  “预览订单知识库”
+  “检查订单模块的知识置信度”
+
+生成、检索、预览和置信检查由已安装的 Skills 编排；知识检索通过 MCP 完成。`
 
 const flags = {}
 const positional = []
-const options = { projectRoot: process.cwd(), module: '', detail: '', maxTopics: 5, repeat: 1, json: false, days: 30, evidence: [] }
+let projectRootExplicit = false
+const options = {
+  projectRoot: process.cwd(), module: '', detail: '', maxTopics: 5, repeat: 1, json: false, days: 30,
+  evidence: [], aliases: [], entities: [], gapIds: [], knowledgeIds: [], evidenceIds: [], tags: [],
+}
 
 for (let i = 2; i < process.argv.length; i++) {
   const arg = process.argv[i]
   if (!arg.startsWith('--')) { positional.push(arg); continue }
   const [name, inline] = arg.slice(2).split('=', 2)
-  if (['json', 'incremental', 'validate', 'rebuild', 'no-open', 'unverified'].includes(name)) { flags[name] = true; if (name === 'json') options.json = true; continue }
+  if (['help', 'json', 'update', 'finalize', 'rebuild', 'no-open', 'export', 'force', 'expect-not-found'].includes(name)) {
+    flags[name] = true
+    if (name === 'json') options.json = true
+    if (name === 'expect-not-found') options.expectFound = false
+    continue
+  }
   const value = inline ?? process.argv[++i]
   if (value == null) fail(`--${name} 缺少参数`)
-  if (name === 'project') options.projectRoot = value
+  if (name === 'project') {
+    options.projectRoot = value
+    projectRootExplicit = true
+  }
   else if (name === 'module') options.module = value
   else if (name === 'detail') options.detail = value
   else if (name === 'max-topics') options.maxTopics = Number(value)
   else if (name === 'repeat') options.repeat = Number(value)
   else if (name === 'days') options.days = Number(value)
   else if (name === 'port') options.port = Number(value)
-  else if (name === 'cases') options.casesPath = value
-  else if (name === 'output') options.outputPath = value
   else if (name === 'query') options.query = value
-  else if (name === 'rating') options.rating = value
+  else if (name === 'feedback') options.feedback = value
   else if (name === 'retrieval-id') options.retrievalId = value
   else if (name === 'comment') options.comment = value
   else if (name === 'title') options.title = value
   else if (name === 'question') options.question = value
   else if (name === 'answer') options.answer = value
   else if (name === 'evidence') options.evidence.push(value)
+  else if (name === 'kind') options.kind = value
+  else if (name === 'alias') options.aliases.push(value)
+  else if (name === 'entity') options.entities.push(value)
+  else if (name === 'gap-id') options.gapIds.push(value)
+  else if (name === 'knowledge-id') options.knowledgeIds.push(value)
+  else if (name === 'evidence-id') options.evidenceIds.push(value)
+  else if (name === 'eval-case-id') options.evalCaseId = value
+  else if (name === 'id') options.id = value
+  else if (name === 'source-ref') options.sourceRef = value
+  else if (name === 'tag') options.tags.push(value)
   else fail(`未知参数: --${name}`)
 }
 
-let command = positional.shift() || ''
-let sub = ''
-if (['feedback', 'case'].includes(command)) sub = positional.shift() || ''
+const command = positional.shift() || ''
+const PROJECT_SCOPED_COMMANDS = new Set(['init', 'upgrade', 'uninstall'])
 
 function fail(message, showUsage = false) {
   process.stderr.write(`[codewiki] ${message}\n`)
@@ -85,97 +104,247 @@ function fail(message, showUsage = false) {
   process.exit(1)
 }
 
+if (projectRootExplicit && !PROJECT_SCOPED_COMMANDS.has(command)) {
+  fail('--project 只允许用于 init、upgrade 和 uninstall；知识操作必须在当前项目内运行')
+}
+
 function outputArgs() {
   return ['--output', options.outputPath]
 }
 
+function supportsLegacyFrontendEnhancer(unit) {
+  if (!isFrontendSourceUnit(unit)) return false
+  if (unit.framework === 'generic-js') return true
+  if (unit.framework !== 'vue') return false
+  const major = Number(String(unit.framework_version || '').match(/(\d+)\./)?.[1] || 3)
+  return major >= 3
+}
+
 function runPipeline(target) {
-  if (!target) fail('scan 需要目标路径', true)
-  const absTarget = resolve(options.projectRoot, target)
-  if (!existsSync(absTarget)) fail(`目标目录不存在: ${absTarget}`)
-  if (!options.outputPath) options.outputPath = join(MODULES_ROOT, basename(absTarget))
+  if (!target && !options.module) fail('generate 需要目标路径或已配置的 --module', true)
+  const requestedTarget = target ? resolve(options.projectRoot, target) : null
+  if (requestedTarget && !existsSync(requestedTarget)) fail(`目标目录不存在: ${requestedTarget}`)
+  const moduleName = options.module || basename(requestedTarget)
+  const sourceUnits = discoverSourceUnits({ projectRoot: options.projectRoot, moduleName, target })
+  if (sourceUnits.length === 0) fail(`未发现模块 ${moduleName} 的可分析 Source Unit；请检查目标路径或 codewiki.yml`)
+  const transactionTarget = sourceUnits.length === 1 ? sourceUnits[0].abs_path : resolve(options.projectRoot)
+  if (!options.outputPath) options.outputPath = join(knowledgeRootRelative(options.projectRoot), moduleName)
+  const moduleDir = resolve(options.projectRoot, options.outputPath)
+  const transaction = beginGenerationTransaction({
+    projectRoot: options.projectRoot,
+    moduleName,
+    moduleDir,
+    targetDir: transactionTarget,
+  })
+  const legacyFrontendUnit = sourceUnits.length === 1 && supportsLegacyFrontendEnhancer(sourceUnits[0]) ? sourceUnits[0] : null
   const pipeline = [
-    // Order matters: graph-cluster must run before deep-analyzer; field-lineage
-    // fuses the intermediates produced by the three parallel-capable stages.
-    ['nav-parser.mjs', [...outputArgs(), ...(flags.incremental ? ['--incremental'] : [])]],
-    ['graph-cluster.mjs', [...outputArgs()]],
-    ['data-shape-tracer.mjs', [...outputArgs()]],
-    ['pinia-tracker.mjs', [...outputArgs()]],
-    ['deep-analyzer.mjs', [...outputArgs()]],
-    ['field-lineage.mjs', [...outputArgs()]],
+    ['fact-extractor.mjs', [
+      ...(target ? [target] : []),
+      '--project', resolve(options.projectRoot),
+      '--module', moduleName,
+      ...outputArgs(),
+    ], resolve(options.projectRoot)],
+    ...(legacyFrontendUnit ? [
+      // The existing six-stage profile remains the deep Vue/TS enhancer for a
+      // single frontend Source Unit. Multi-unit modules use normalized facts.
+      ['nav-parser.mjs', [...outputArgs(), ...(flags.update ? ['--incremental'] : [])], legacyFrontendUnit.abs_path],
+      ['graph-cluster.mjs', [...outputArgs()], legacyFrontendUnit.abs_path],
+      ['data-shape-tracer.mjs', [...outputArgs()], legacyFrontendUnit.abs_path],
+      ['pinia-tracker.mjs', [...outputArgs()], legacyFrontendUnit.abs_path],
+      ['deep-analyzer.mjs', [...outputArgs()], legacyFrontendUnit.abs_path],
+      ['field-lineage.mjs', [...outputArgs()], legacyFrontendUnit.abs_path],
+    ] : []),
   ]
   const startedAt = Date.now()
-  for (const [script, args] of pipeline) {
-    const scriptPath = join(SCAN_DIR, script)
-    if (!existsSync(scriptPath)) fail(`缺少脚本: ${scriptPath}（安装可能不完整）`)
-    process.stderr.write(`▶ ${script}\n`)
-    const result = spawnSync(process.execPath, [scriptPath, absTarget, ...args], {
-      cwd: options.projectRoot,
-      stdio: 'inherit',
-    })
-    if (result.status !== 0) fail(`${script} 失败（退出码 ${result.status}）`)
+  try {
+    for (const [script, args, scriptTarget] of pipeline) {
+      const scriptPath = join(SCAN_DIR, script)
+      if (!existsSync(scriptPath)) throw new Error(`缺少脚本: ${scriptPath}（安装可能不完整）`)
+      process.stderr.write(`▶ ${script}\n`)
+      const scriptArgs = script === 'fact-extractor.mjs'
+        ? [scriptPath, ...args]
+        : [scriptPath, scriptTarget || transactionTarget, ...args]
+      const result = spawnSync(process.execPath, scriptArgs, options.json
+        ? { cwd: options.projectRoot, stdio: ['inherit', 'pipe', 'inherit'], encoding: 'utf8' }
+        : { cwd: options.projectRoot, stdio: 'inherit' })
+      // --json 保证 stdout 只有最终 JSON；各扫描阶段的日志统一转到 stderr。
+      if (options.json && result.stdout) process.stderr.write(result.stdout)
+      if (result.error) throw result.error
+      if (result.status !== 0) throw new Error(`${script} 失败（退出码 ${result.status}）`)
+    }
+    compileUnifiedGraph(moduleDir, options.projectRoot)
+    const impact = classifyGeneratedImpact(transaction.baseline_dir, moduleDir)
+    updateGenerationTransaction(options.projectRoot, moduleName, { impact })
+    process.stderr.write(`✓ Source Units：${sourceUnits.map(sourceUnitSummary).join('；')}\n`)
+    process.stderr.write(`✓ 管线完成，产出 ${options.outputPath}/navigation/，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s\n`)
+    process.stderr.write(`✓ 影响分类：${impact.classification}（${impact.reason}）\n`)
+    if (impact.knowledge_ids?.length) process.stderr.write(`✓ 受影响知识：${impact.knowledge_ids.join(', ')}\n`)
+    if (impact.eval_case_ids?.length) process.stderr.write(`✓ 需回归 Case：${impact.eval_case_ids.join(', ')}\n`)
+    if (impact.classification === 'KNOWLEDGE_IMPACT') {
+      process.stderr.write(`✓ 下一步：只更新受影响的 product/developer，再运行 npx codewiki generate${target ? ` ${target}` : ''} --module ${moduleName} --finalize\n`)
+    } else {
+      process.stderr.write(`✓ 无需改写语义文档；直接运行 npx codewiki generate${target ? ` ${target}` : ''} --module ${moduleName} --finalize\n`)
+    }
+    return {
+      module: moduleName,
+      output: options.outputPath,
+      source_units: sourceUnits.map(({ abs_path: _absPath, ...unit }) => unit),
+      impact,
+    }
+  } catch (error) {
+    const rolledBack = rollbackGenerationTransaction(options.projectRoot, moduleName, error.message)
+    if (rolledBack) process.stderr.write(`[codewiki] 生成失败，已恢复生成前知识库；失败现场保留在 ${rolledBack.failed_dir}\n`)
+    throw error
   }
-  process.stderr.write(`✓ 管线完成，产出 ${options.outputPath}/navigation/，耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s\n`)
-  process.stderr.write(`✓ 下一步：撰写 product/frontend 语义层后运行 codewiki index（工作流见 /wiki-scan）\n`)
+}
+
+function buildIndexes(module = options.module) {
+  const indexes = buildProjectIndex({ ...options, module, projectRoot: options.projectRoot })
+  for (const index of indexes) {
+    const warnings = index.warnings.length ? `，${index.warnings.length} 条警告` : ''
+    process.stdout.write(`[codewiki] ${index.metadata.module}: ${index.knowledge.length} 篇知识文档，${index.nav_nodes.length} 个导航节点，${index.bindings.length} 条绑定${warnings}\n`)
+  }
+  return indexes
+}
+
+function evaluateCases(module) {
+  const projectRoot = resolve(options.projectRoot)
+  const cases = loadEvalCases(projectRoot, module).filter(item => item.status === 'active')
+  if (cases.length === 0) {
+    process.stdout.write(`[codewiki] ${module}: 暂无 active Eval Case，跳过回归\n`)
+    return null
+  }
+  const evaluation = evaluateKnowledgeBase({ ...options, projectRoot, module, cases })
+  const moduleDir = moduleDirs(projectRoot, module)[0]
+  const casesPath = moduleDir
+    ? relative(projectRoot, join(moduleDir, 'retrieval-cases.json')).replace(/\\/g, '/')
+    : `${knowledgeRootRelative(projectRoot)}/${module}/retrieval-cases.json`
+  const run = recordEvaluationRun(projectRoot, evaluation, casesPath)
+  process.stdout.write(`[codewiki] ${module}: Case ${evaluation.summary.passed}/${evaluation.summary.total} 通过，Top-3=${evaluation.summary.top3_knowledge_hit_rate}，证据召回=${evaluation.summary.evidence_recall}（run_id=${run.run_id}）\n`)
+  return evaluation
+}
+
+function finalizeGeneration(target) {
+  if (!options.module) fail('generate --finalize 需要 --module <name>', true)
+  const dirs = moduleDirs(options.projectRoot, options.module)
+  if (dirs.length !== 1) fail(`未找到唯一知识模块: ${options.module}`)
+  let transaction = null
+  try {
+    transaction = assertGenerationUnchanged(options.projectRoot, options.module)
+    assertKnowledgeImpactReviewed(options.projectRoot, options.module)
+  } catch (error) {
+    const rolledBack = rollbackGenerationTransaction(options.projectRoot, options.module, error.message)
+    if (rolledBack) process.stderr.write(`[codewiki] 已恢复生成前知识库；失败现场保留在 ${rolledBack.failed_dir}\n`)
+    throw error
+  }
+  const validationTarget = target
+    ? resolve(options.projectRoot, target)
+    : transaction?.target_dir || resolve(options.projectRoot)
+  const result = spawnSync(process.execPath, [join(SCAN_DIR, 'deep-analyzer.mjs'), validationTarget, dirs[0], '--validate'], {
+    cwd: options.projectRoot,
+    stdio: 'inherit',
+  })
+  if (result.status !== 0) {
+    const rolledBack = rollbackGenerationTransaction(options.projectRoot, options.module, `evidence validation failed (${result.status})`)
+    if (rolledBack) process.stderr.write(`[codewiki] 校验失败，已恢复生成前知识库；失败现场保留在 ${rolledBack.failed_dir}\n`)
+    return result.status ?? 1
+  }
+  try {
+    const indexes = buildIndexes(options.module)
+    const evaluation = evaluateCases(options.module)
+    if (evaluation?.summary.failed > 0) throw new Error(`Eval Case 回归失败: ${evaluation.summary.failed}`)
+    completeGenerationTransaction(options.projectRoot, options.module, {
+      graph_stats: indexes[0]?.graph_stats || null,
+      knowledge_freshness: indexes[0]?.knowledge_freshness || null,
+      evaluation: evaluation?.summary || null,
+    })
+    return 0
+  } catch (error) {
+    const rolledBack = rollbackGenerationTransaction(options.projectRoot, options.module, error.message)
+    if (rolledBack) process.stderr.write(`[codewiki] Finalize 失败，已恢复生成前知识库；失败现场保留在 ${rolledBack.failed_dir}\n`)
+    throw error
+  }
+}
+
+function supplementKnowledge() {
+  let knowledge = null
+  const code = runKnowledgeAdd({ ...options, onResult: result => { knowledge = result } })
+  if (code !== 0 || !knowledge) return code || 1
+  buildIndexes(knowledge.module)
+  const caseCode = runEvalAdd({ ...options, module: knowledge.module, knowledgeIds: [knowledge.id] })
+  if (caseCode !== 0) return caseCode
+  return evaluateCases(knowledge.module)?.summary.failed > 0 ? 1 : 0
 }
 
 try {
   if (command === 'init') {
     process.exit(runInit({ ...options, force: flags.force }))
-  } else if (command === 'scan') {
-    if (flags.validate) {
-      const [target, outputDir] = positional
-      if (!target || !outputDir) fail(`scan --validate 需要 <target> <output-dir>（例如 ${MODULES_ROOT}/<module>）`)
-      const result = spawnSync(process.execPath, [join(SCAN_DIR, 'deep-analyzer.mjs'), target, outputDir, '--validate'], {
-        cwd: options.projectRoot,
-        stdio: 'inherit',
-      })
-      process.exit(result.status ?? 1)
+  } else if (command === 'upgrade') {
+    process.exit(runUpgrade(options))
+  } else if (command === 'uninstall') {
+    process.exit(runUninstall(options))
+  } else if (command === 'generate') {
+    if (options.title || options.answer || options.kind) process.exit(supplementKnowledge())
+    if (flags.finalize) process.exit(finalizeGeneration(positional[0]))
+    const generated = runPipeline(positional[0])
+    if (options.json) process.stdout.write(`${JSON.stringify(generated, null, 2)}\n`)
+  } else if (command === 'query') {
+    const query = positional.join(' ') || options.query || ''
+    if (!query.trim() && options.feedback) {
+      let feedback = null
+      const code = runFeedback({ ...options, rating: options.feedback, quiet: options.json, onResult: result => { feedback = result } })
+      if (options.json && feedback) process.stdout.write(`${JSON.stringify(feedback, null, 2)}\n`)
+      process.exit(code)
     }
-    runPipeline(positional[0])
-  } else if (command === 'index' || command === 'build') {
-    const indexes = buildProjectIndex({ ...options, projectRoot: options.projectRoot })
-    const summary = indexes.map(index => ({
-      module: index.metadata.module,
-      knowledge: index.knowledge.length,
-      navigation_nodes: index.nav_nodes.length,
-      navigation_edges: index.nav_edges.length,
-      bindings: index.bindings.length,
-      warnings: index.warnings,
-    }))
-    process.stdout.write(options.json
-      ? `${JSON.stringify(summary, null, 2)}\n`
-      : summary.map(item => `[codewiki] ${item.module}: ${item.knowledge} 篇语义文档，${item.navigation_nodes} 个导航节点，${item.bindings} 条绑定${item.warnings.length ? `，${item.warnings.length} 条警告` : ''}`).join('\n') + '\n')
-  } else if (command === 'query' || command === 'explore') {
-    const query = positional.join(' ') || options.query
     if (!query.trim()) fail('query 需要检索问题', true)
+    const startedAt = performance.now()
     const result = exploreKnowledgeBase({ ...options, query })
-    process.stdout.write(options.json ? `${JSON.stringify(result, null, 2)}\n` : `${formatExploreResult(result)}\n`)
-  } else if (command === 'evaluate') {
-    if (!options.casesPath) fail('evaluate 需要 --cases <json>')
-    const casesPath = resolve(options.projectRoot, options.casesPath)
-    const parsed = JSON.parse(readFileSync(casesPath, 'utf8'))
-    const evaluation = evaluateKnowledgeBase({ ...options, cases: Array.isArray(parsed) ? parsed : parsed.cases })
-    const output = `${JSON.stringify(evaluation, null, 2)}\n`
-    if (options.outputPath) writeFileSync(resolve(options.projectRoot, options.outputPath), output, 'utf8')
-    process.stdout.write(output)
-    if (evaluation.summary.failed > 0) process.exitCode = 1
+    const at = new Date().toISOString()
+    const retrievalId = createRetrievalId({ query, at, nonce: process.pid })
+    const knowledgeIds = [...new Set(result.modules.flatMap(item => item.topics.map(topic => topic.id)))]
+    const evidenceIds = [...new Set(result.modules.flatMap(item => item.evidence.map(evidence => evidence.id)))]
+    const modules = result.modules.map(item => item.module)
+    const module = options.module || modules[0] || null
+    const gapId = result.found ? null : openGap(options.projectRoot, {
+      module: module || 'unknown', query, kind: 'retrieval_miss', retrievalId, at,
+    })
+    appendJsonl(statePath(options.projectRoot, 'retrieval.jsonl'), {
+      retrieval_id: retrievalId,
+      at,
+      query,
+      module,
+      modules,
+      found: result.found,
+      fallback: false,
+      topic_count: result.modules.reduce((sum, item) => sum + item.topics.length, 0),
+      evidence_count: result.modules.reduce((sum, item) => sum + item.evidence.length, 0),
+      knowledge_ids: knowledgeIds,
+      evidence_ids: evidenceIds,
+      intent: result.intent,
+      route: result.route,
+      detail: options.detail || (result.intent === 'semantic' ? 'semantic' : 'evidence'),
+      stale: result.modules.some(item => item.stale),
+      latency_ms: Number((performance.now() - startedAt).toFixed(3)),
+      ...(gapId ? { gap_id: gapId } : {}),
+    })
+    result.retrieval_id = retrievalId
+    if (gapId) result.gap_id = gapId
+    if (options.feedback) {
+      let feedback = null
+      const code = runFeedback({ ...options, rating: options.feedback, query, retrievalId, quiet: true, onResult: item => { feedback = item } })
+      if (code !== 0) process.exit(code)
+      result.feedback = feedback
+    }
+    process.stdout.write(options.json
+      ? `${JSON.stringify(result, null, 2)}\n`
+      : `${formatExploreResult(result)}\n\n[codewiki] retrieval_id=${retrievalId}${gapId ? ` gap_id=${gapId}` : ''}${result.feedback ? ` feedback_id=${result.feedback.feedback_id}` : ''}\n`)
   } else if (command === 'confidence') {
     process.exit(await runConfidence(options))
-  } else if (command === 'feedback') {
-    process.exit(runFeedback({ sub, ...options }))
-  } else if (command === 'case') {
-    if (sub !== 'add') fail('用法: codewiki case add --module M --title ... --question ... --answer ... --evidence <file:line>')
-    process.exit(runCaseAdd({ ...options, verified: flags.unverified ? false : true }))
-  } else if (command === 'site') {
-    const site = renderSite(options.projectRoot, { module: options.module })
-    process.stdout.write(`[codewiki] 站点已生成：${site.outDir}\n`)
-    for (const module of site.modules) process.stdout.write(`  - ${module.name}: ${module.docs} 篇文档，评级 ${module.grade}\n`)
   } else if (command === 'preview') {
-    process.exit(await runPreview({ ...options, noOpen: flags['no-open'] }))
+    process.exit(await runPreview({ ...options, noOpen: flags['no-open'], export: flags.export }))
   } else if (command === 'mcp') {
     await import('./scan/mcp-server.mjs')
-  } else if (command === 'help' || command === '--help' || command === '-h' || command === '') {
+  } else if (flags.help || command === 'help' || command === '-h' || command === '') {
     process.stdout.write(`${usage}\n`)
   } else {
     fail(`未知命令: ${command}`, true)

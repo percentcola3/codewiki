@@ -3,6 +3,8 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSy
 import { join, relative, extname, basename, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { calculateKnowledgeConfidence, deriveNavigationCases } from './knowledge-confidence.mjs'
+import { knowledgeRootRelative, loadProjectConfig, statePath } from '../config.mjs'
+import { buildUsageReport } from '../report.mjs'
 
 const args = process.argv.slice(2)
 const validateMode = args.includes('--validate')
@@ -22,7 +24,7 @@ if (!existsSync(absTarget)) {
 }
 
 const EXCLUDE_DIRS = new Set(['node_modules', 'dist', '.doc', '.git', '__tests__', '__test__'])
-const VALID_EXTS = new Set(['.vue', '.ts', '.js', '.tsx', '.jsx'])
+const VALID_EXTS = new Set(['.vue', '.ts', '.js', '.tsx', '.jsx', '.java', '.go'])
 
 function collectFiles(dir, baseDir = dir) {
   const results = []
@@ -155,8 +157,8 @@ function analyzeMarkdownClaims(content) {
 
 function classifyLayer(relPath) {
   const parts = relPath.replace(/\\/g, '/').split('/')
-  const docIdx = parts.indexOf('docs')
-  if (docIdx >= 0 && parts.length > docIdx + 2) return parts[docIdx + 2]
+  const known = parts.find(part => ['product', 'developer', 'frontend', 'quality', 'navigation', 'revisions'].includes(part))
+  if (known) return known === 'frontend' ? 'developer' : known
   // fallback if relPath is like "product/foo.md"
   return parts[0] || 'other'
 }
@@ -168,7 +170,7 @@ function moduleFromOutputDir(dir) {
 
 function extractFileLineReferences(content) {
   const refs = []
-  const pattern = /(?<![\w:/.-])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:vue|ts|js|tsx|jsx|mjs|cjs|md|json|ya?ml)):(\d+)\b/g
+  const pattern = /(?<![\w:/.-])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:vue|ts|js|tsx|jsx|mjs|cjs|java|go|md|json|ya?ml)):(\d+)\b/g
   let match
   while ((match = pattern.exec(content)) !== null) {
     refs.push({ file: match[1], line: Number(match[2]), reference: `${match[1]}:${match[2]}` })
@@ -328,7 +330,8 @@ function parseYamlLite(raw) {
 
 function collectEvalLogIntents(projectRoot, moduleName) {
   if (!moduleName) return []
-  const root = join(projectRoot, '.codewiki', 'eval-log')
+  const root = statePath(projectRoot, 'eval-log')
+  const configuredRoot = knowledgeRootRelative(projectRoot).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   if (!existsSync(root)) return []
   const intents = []
   let branches
@@ -346,7 +349,7 @@ function collectEvalLogIntents(projectRoot, moduleName) {
         if (!item || typeof item !== 'object') continue
         if (item.outcome !== 'not_found' && item.outcome !== 'partial') continue
         const kbSection = String(item.kb_section || '')
-        const moduleMatch = kbSection.match(/^(?:\.codewiki\/modules|docs)\/([^/]+)\//)
+        const moduleMatch = kbSection.match(new RegExp(`^(?:${configuredRoot}|\\.codewiki/modules|docs)/([^/]+)/`))
         if (!moduleMatch || moduleMatch[1] !== moduleName) continue
         intents.push({
           question: String(item.question || '').trim(),
@@ -406,7 +409,7 @@ function collectNamedFiles(dir, filename) {
 }
 
 function collectQualityKnowledge(projectRoot, moduleName) {
-  const reportsRoot = join(projectRoot, '.codewiki', 'quality-report')
+  const reportsRoot = statePath(projectRoot, 'quality-report')
   const reports = collectNamedFiles(reportsRoot, 'quality-report-v2.json')
     .map(filePath => readJsonOr(filePath, null))
     .filter(Boolean)
@@ -476,7 +479,7 @@ function syncQualityConfidence(projectRoot, perFileConfidence) {
     }).trim() || branch
   } catch {}
   const branchSlug = branch.replace(/[\\/:*?"<>|]+/g, '_').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'unknown'
-  const reportPath = join(projectRoot, '.codewiki', 'quality-report', branchSlug, 'quality-report-v2.json')
+  const reportPath = statePath(projectRoot, 'quality-report', branchSlug, 'quality-report-v2.json')
   if (!existsSync(reportPath)) return false
   const report = readJsonOr(reportPath, null)
   if (!report) return false
@@ -499,7 +502,7 @@ function syncQualityConfidence(projectRoot, perFileConfidence) {
 function recordKnowledgeHealth(projectRoot, moduleName, perFileConfidence) {
   // Append-only audit history, consumed by `codewiki confidence`.
   try {
-    const dir = join(projectRoot, '.codewiki', 'knowledge-health', moduleName)
+    const dir = statePath(projectRoot, 'knowledge-health', moduleName)
     mkdirSync(dir, { recursive: true })
     appendFileSync(join(dir, 'confidence-history.jsonl'), `${JSON.stringify({
       module: moduleName,
@@ -637,8 +640,7 @@ function generateReviewDoc({ docsRoot, perFileConfidence, references, projectRoo
   })))
 
   // Dynamic signals (Section 7)
-  const intents = collectEvalLogIntents(projectRoot, moduleName)
-  const intentAgg = aggregateIntents(intents)
+  const usageReport = buildUsageReport(projectRoot, { module: moduleName, days: 30 })
   // mark which intents also exist in static pendingByDoc
   const pendingTexts = new Set(pendingByDoc.map(p => `${p.doc}:${p.line}`))
 
@@ -752,22 +754,23 @@ function generateReviewDoc({ docsRoot, perFileConfidence, references, projectRoo
   }
   lines.push('')
 
-  lines.push('## 七、AI 实际检索缺口（最近会话）')
+  lines.push('## 七、真实检索与 Case（最近 30 天）')
   lines.push('')
-  lines.push('（来自 .codewiki/eval-log/*/eval-log.yaml retrieval_intents 中标 not_found / partial 的项，按出现次数）')
+  lines.push('（来自 retrieval.jsonl；可靠命中仅限显式关联、反馈来源关联或问题完全一致。候选不计入覆盖率。）')
   lines.push('')
-  if (intentAgg.length) {
-    lines.push('| 问题 | 出现次数 | not_found | partial | 关联 stage | 是否同时静态缺失 |')
-    lines.push('|---|---|---|---|---|---|')
-    for (const item of intentAgg.slice(0, 30)) {
-      const overlapsStatic = pendingByDoc.some(p =>
-        p.doc.includes(item.question.slice(0, 6)) || (item.miss_reasons || []).some(r => p.doc && r.includes(p.doc))
-      )
-      const stageLabel = item.stages.join(' / ') || '—'
-      lines.push(`| ${item.question} | ${item.count} | ${item.not_found} | ${item.partial} | ${stageLabel} | ${overlapsStatic ? '✅' : '❌'} |`)
-    }
+  const coverage = usageReport.case_coverage
+  const feedback = usageReport.feedback
+  lines.push(`- 唯一问题：${usageReport.usage.unique_query_count}；可靠命中：${coverage.matched}；候选：${coverage.candidate}；未覆盖：${coverage.missing}；可靠覆盖率：${coverage.coverage_rate ?? 'N/A'}`)
+  lines.push(`- 用户评价：已评价 ${feedback.rated_queries}/${usageReport.usage.unique_query_count}；未评价 ${feedback.unrated_queries}；有帮助 ${feedback.good}；没帮助 ${feedback.bad}`)
+  if (coverage.matched_queries.length || coverage.candidate_queries.length || coverage.missing_queries.length) {
+    lines.push('')
+    lines.push('| 状态 | 问题 | Case | 命中方式 |')
+    lines.push('|---|---|---|---|')
+    for (const item of coverage.matched_queries.slice(0, 10)) lines.push(`| matched | ${item.query} | ${item.case_id} | ${item.reason} |`)
+    for (const item of coverage.candidate_queries.slice(0, 10)) lines.push(`| candidate | ${item.query} | ${item.case_id || '—'} | ${item.reason} |`)
+    for (const item of coverage.missing_queries.slice(0, 10)) lines.push(`| missing | ${item.query} | — | ${item.reason} |`)
   } else {
-    lines.push('- 无（eval-log 中没有该模块的 not_found / partial 记录）')
+    lines.push('- 暂无真实检索记录')
   }
   lines.push('')
 
@@ -812,7 +815,7 @@ function validateFieldLineage() {
     fieldId,
   ])
   const validateEvidence = ref => {
-    const match = String(ref || '').trim().match(/^(.+\.(?:vue|ts|js|tsx|jsx|mjs|cjs|md|json|ya?ml)):(\d+)$/)
+    const match = String(ref || '').trim().match(/^(.+\.(?:vue|ts|js|tsx|jsx|mjs|cjs|java|go|md|json|ya?ml)):(\d+)$/)
     if (!match) return false
     const resolved = resolveFilePath(match[1], process.cwd())
     if (!resolved.found) return false

@@ -4,14 +4,25 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { basename, dirname, extname, join, relative, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { parse as parseYaml } from 'yaml'
+import {
+  DEFAULT_MODULES_ROOT,
+  loadProjectConfig,
+  resolveKnowledgeRoot,
+  statePath,
+} from '../config.mjs'
+import { evidenceFingerprint, graphStats, normalizeGraph, writeGraph } from '../graph/store.mjs'
+import { edgeAllowed, routeQuery } from '../retrieval/query-router.mjs'
 
-const INDEX_VERSION = 3
+const INDEX_VERSION = 4
 const MAX_OUTPUT_CHARS = 20000
 const MAX_EVIDENCE_FILES = 8
 const BINDING_ROLES = new Set(['entry', 'rule', 'implementation', 'state', 'data'])
 const BINDING_CONFIDENCE = new Set(['verified', 'ast', 'candidate'])
+const QUALITY_SOURCE_TYPES = new Set(['code', 'commit', 'test', 'issue', 'document', 'user_confirmed'])
 const STOP_TERMS = new Set(['什么', '怎么', '如何', '为什么', '是否', '这个', '那个', '实现', '相关', '代码', '功能'])
-const KNOWLEDGE_DIRS = ['product', 'frontend']
+const HISTORY_QUERY_PATTERN = /历史|以前|曾经|当时|旧版|为什么改|为何改/
+const KNOWLEDGE_DIRS = ['product', 'developer', 'quality']
+const READABLE_KNOWLEDGE_DIRS = [...KNOWLEDGE_DIRS, 'frontend']
 const INDEXED_NAVIGATION_FILES = [
   'file-graph.json',
   'func-dependencies.json',
@@ -96,7 +107,7 @@ function markdownHeadings(body) {
 
 function codeReferences(body) {
   const refs = []
-  const pattern = /(?<![\w:/.-])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:vue|ts|js|tsx|jsx|mjs|cjs)):(\d+)\b/g
+  const pattern = /(?<![\w:/.-])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:vue|ts|js|tsx|jsx|mjs|cjs|java|go)):(\d+)\b/g
   let match
   while ((match = pattern.exec(body)) !== null) {
     refs.push({ file: normalizePath(match[1]), line: Number(match[2]) })
@@ -123,7 +134,8 @@ export function parseKnowledgeDocument(filePath, moduleDir, moduleName) {
   const content = readText(filePath)
   const { data, body } = parseFrontmatter(content)
   const relPath = normalizePath(relative(moduleDir, filePath))
-  const layer = relPath.split('/')[0] || 'overview'
+  const sourceLayer = relPath.split('/')[0] || 'overview'
+  const layer = sourceLayer === 'frontend' ? 'developer' : sourceLayer
   const heading = body.match(/^#\s+(.+)$/m)?.[1]
   const title = String(data.title || heading || basename(filePath, extname(filePath))).trim()
   const evidence = Array.isArray(data.evidence || data.evidence_refs)
@@ -135,12 +147,16 @@ export function parseKnowledgeDocument(filePath, moduleDir, moduleName) {
     id: String(data.id || knowledgeFallbackId(moduleName, layer, relPath)),
     module: moduleName,
     kind: String(data.kind || layer),
+    status: String(data.status || 'active'),
     layer,
     title,
     aliases: asStringArray(data.aliases),
     questions: asStringArray(data.questions),
     entities: asStringArray(data.entities),
     related: asStringArray(data.related),
+    supersedes: asStringArray(data.supersedes),
+    closes_gaps: asStringArray(data.closes_gaps),
+    sources: Array.isArray(data.sources) ? data.sources : [],
     evidence,
     code_refs: codeReferences(body),
     path: relPath,
@@ -182,6 +198,7 @@ function parseCaseKnowledge(item, moduleName, sourcePath) {
     id: String(item.id),
     module: moduleName,
     kind: String(item.kind || 'feedback'),
+    status: 'active',
     layer: 'cases',
     title: String(item.title || item.questions?.[0] || '反馈知识').trim(),
     aliases: asStringArray(item.aliases),
@@ -216,7 +233,7 @@ function readCaseKnowledge(filePath, moduleName, sourcePath) {
 function caseKnowledgeFiles(projectRoot, moduleDir, moduleName) {
   return [
     { file: join(moduleDir, 'cases', 'index.jsonl'), path: 'cases/index.jsonl' },
-    { file: join(projectRoot, '.codewiki', 'knowledge-overlay', `${encodeId(moduleName)}.jsonl`), path: `.codewiki/knowledge-overlay/${encodeId(moduleName)}.jsonl` },
+    { file: statePath(projectRoot, 'knowledge-overlay', `${encodeId(moduleName)}.jsonl`), path: `${loadProjectConfig(projectRoot).stateRoot}/knowledge-overlay/${encodeId(moduleName)}.jsonl` },
   ]
 }
 
@@ -224,10 +241,12 @@ function collectKnowledge(projectRoot, moduleDir, moduleName) {
   const files = []
   const readme = join(moduleDir, 'README.md')
   if (existsSync(readme)) files.push(readme)
-  for (const dirName of KNOWLEDGE_DIRS) {
+  for (const dirName of READABLE_KNOWLEDGE_DIRS) {
     listFiles(join(moduleDir, dirName), file => file.endsWith('.md'), files)
   }
-  const knowledge = files.map(file => parseKnowledgeDocument(file, moduleDir, moduleName))
+  const knowledge = files
+    .map(file => parseKnowledgeDocument(file, moduleDir, moduleName))
+    .filter(doc => !['archived', 'disabled'].includes(doc.status))
   for (const source of caseKnowledgeFiles(projectRoot, moduleDir, moduleName)) {
     knowledge.push(...readCaseKnowledge(source.file, moduleName, source.path))
   }
@@ -280,6 +299,8 @@ function navigationGraph(moduleDir) {
       type,
       confidence: confidenceValue(options.confidence),
       evidence: options.evidence || [],
+      ...(options.resolver ? { resolver: options.resolver } : {}),
+      ...(options.source_unit ? { source_unit: options.source_unit } : {}),
     })
   }
 
@@ -305,6 +326,25 @@ function navigationGraph(moduleDir) {
       id: edge.id,
       confidence: edge.confidence,
       evidence: edge.evidence,
+    })
+  }
+
+  // Source Unit adapters contribute normalized cross-language/framework facts.
+  // They share stable nav:* IDs with the legacy frontend graph, so existing
+  // Vue facts merge while React/Java/Go facts extend the same module graph.
+  const frameworkFacts = readJson(join(navDir, 'framework-facts.json'), { data: { nodes: [], edges: [] } })
+  warnings.push(...(frameworkFacts?.warnings || []))
+  for (const node of frameworkFacts?.data?.nodes || []) {
+    addNode(node)
+    if (node.type === 'file' && node.file) fileIds.set(normalizePath(node.file), node.id)
+  }
+  for (const edge of frameworkFacts?.data?.edges || []) {
+    addEdge(edge.from, edge.to, edge.type, {
+      id: edge.id,
+      confidence: edge.confidence,
+      evidence: edge.evidence,
+      resolver: edge.resolver,
+      source_unit: edge.source_unit,
     })
   }
 
@@ -504,6 +544,19 @@ function navigationGraph(moduleDir) {
   return { nodes: [...nodes.values()], edges, fileIds: Object.fromEntries(fileIds), warnings }
 }
 
+export function compileUnifiedGraph(moduleDir, projectRoot = null) {
+  let graph = normalizeGraph(navigationGraph(moduleDir))
+  if (projectRoot) {
+    const moduleName = moduleNameFromManifest(moduleDir)
+    addKnowledgeCodeReferenceNodes(graph, collectKnowledge(resolve(projectRoot), moduleDir, moduleName))
+    graph = normalizeGraph(graph)
+  }
+  return writeGraph(moduleDir, graph, {
+    module: moduleNameFromManifest(moduleDir),
+    base_commit: manifestBaseCommit(moduleDir),
+  })
+}
+
 function addKnowledgeCodeReferenceNodes(graph, knowledge) {
   const nodeIds = new Set(graph.nodes.map(node => node.id))
   const edgeIds = new Set(graph.edges.map(edge => edge.id))
@@ -554,12 +607,18 @@ function parseBindings(filePath) {
   return { bindings, warnings }
 }
 
-function normalizeBindings({ moduleDir, knowledge, graph }) {
+function normalizeBindings({ moduleDir, knowledge, graph, acceptCurrentEvidence = false }) {
   const bindingPath = join(moduleDir, 'navigation', 'bindings.jsonl')
   const parsed = parseBindings(bindingPath)
   const knowledgeIds = new Set(knowledge.map(item => item.id))
   const navIds = new Set(graph.nodes.map(item => item.id))
+  const navById = new Map(graph.nodes.map(item => [item.id, item]))
   const legacyNavIds = new Map(graph.nodes.map(item => [item.legacy_id, item.id]).filter(([id]) => id))
+  const previousFingerprints = new Map(parsed.bindings.map(binding => [[
+    binding.knowledge_id,
+    legacyNavIds.get(binding.navigation_id) || binding.navigation_id,
+    binding.role || 'implementation',
+  ].join('::'), binding.evidence_fingerprint]).filter(([, fingerprint]) => fingerprint))
   const bindings = []
   const warnings = [...parsed.warnings]
   const errors = [...parsed.warnings]
@@ -593,12 +652,22 @@ function normalizeBindings({ moduleDir, knowledge, graph }) {
       if (strict) errors.push(message)
       return
     }
+    const key = [knowledgeId, navigationId, role].join('::')
+    const currentEvidenceFingerprint = evidenceFingerprint(navById.get(navigationId))
+    const previousEvidenceFingerprint = binding.evidence_fingerprint || previousFingerprints.get(key)
+    const changed = Boolean(previousEvidenceFingerprint && currentEvidenceFingerprint && previousEvidenceFingerprint !== currentEvidenceFingerprint)
+    const verifiedEvidenceFingerprint = changed && !acceptCurrentEvidence
+      ? previousEvidenceFingerprint
+      : currentEvidenceFingerprint || previousEvidenceFingerprint || null
     bindings.push({
       knowledge_id: knowledgeId,
       navigation_id: navigationId,
       role,
       confidence,
       source: binding.source || 'declared',
+      evidence_fingerprint: verifiedEvidenceFingerprint,
+      current_evidence_fingerprint: currentEvidenceFingerprint,
+      freshness: changed && !acceptCurrentEvidence ? 'stale' : currentEvidenceFingerprint ? 'current' : 'unverified',
     })
   }
 
@@ -639,6 +708,37 @@ function normalizeBindings({ moduleDir, knowledge, graph }) {
   return { bindings: [...deduped.values()], warnings: unique(warnings), errors: unique(errors), bindingPath }
 }
 
+function bindingFreshness(bindings, knowledge) {
+  const activeIds = new Set(knowledge.filter(doc => doc.status === 'active').map(doc => doc.id))
+  const byKnowledge = new Map()
+  for (const binding of bindings) {
+    if (!activeIds.has(binding.knowledge_id)) continue
+    const items = byKnowledge.get(binding.knowledge_id) || []
+    items.push(binding)
+    byKnowledge.set(binding.knowledge_id, items)
+  }
+  const items = [...activeIds].map(knowledgeId => {
+    const evidence = byKnowledge.get(knowledgeId) || []
+    const statuses = evidence.map(item => item.freshness)
+    const freshness = evidence.length === 0
+      ? 'unverified'
+      : statuses.includes('stale')
+        ? 'stale'
+        : statuses.every(status => status === 'current')
+          ? 'current'
+          : 'unverified'
+    return { knowledge_id: knowledgeId, freshness, evidence_count: evidence.length }
+  })
+  const counts = { current: 0, stale: 0, unverified: 0 }
+  for (const item of items) counts[item.freshness]++
+  return {
+    total: items.length,
+    ...counts,
+    current_rate: items.length > 0 ? Number((counts.current / items.length).toFixed(4)) : null,
+    items,
+  }
+}
+
 function indexTerms(knowledge) {
   const postings = {}
   for (const doc of knowledge) {
@@ -658,7 +758,7 @@ function sourceFiles(moduleDir) {
     const file = join(moduleDir, name)
     if (existsSync(file)) files.push(file)
   }
-  for (const dirName of [...KNOWLEDGE_DIRS, 'navigation']) {
+  for (const dirName of [...READABLE_KNOWLEDGE_DIRS, 'navigation']) {
     listFiles(join(moduleDir, dirName), file => ['.md', '.json', '.jsonl', '.yml', '.yaml'].includes(extname(file)), files)
   }
   return unique(files).sort()
@@ -730,7 +830,8 @@ function moduleFreshness(index, gitState) {
   const targetPaths = (index.metadata.target_paths || []).map(normalizePath)
   const graphFiles = new Set(index.nav_nodes.map(node => normalizePath(node.file)).filter(Boolean))
   function isRelevant(file) {
-    if (file === '.codewiki' || file.startsWith('.codewiki/')) return false
+    const stateRoot = loadProjectConfig(gitState.project_root).stateRoot
+    if (file === stateRoot || file.startsWith(`${stateRoot}/`)) return false
     if (moduleDir && (file === moduleDir || file.startsWith(`${moduleDir}/`))) return false
     if (targetPaths.length === 0) return true
     return graphFiles.has(file) || targetPaths.some(target => file === target || file.startsWith(`${target}/`))
@@ -768,10 +869,10 @@ function manifestTargetPaths(moduleDir) {
   }
 }
 
-export const MODULES_ROOT = '.codewiki/modules'
+export const MODULES_ROOT = DEFAULT_MODULES_ROOT
 
 export function moduleDirs(projectRoot, requestedModule) {
-  const modulesRoot = join(projectRoot, MODULES_ROOT)
+  const modulesRoot = resolveKnowledgeRoot(projectRoot)
   if (requestedModule) {
     const direct = resolve(projectRoot, requestedModule)
     if (existsSync(direct) && statSync(direct).isDirectory()) return [direct]
@@ -782,7 +883,7 @@ export function moduleDirs(projectRoot, requestedModule) {
   return readdirSync(modulesRoot, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
     .map(entry => join(modulesRoot, entry.name))
-    .filter(dir => existsSync(join(dir, 'manifest.yml')) || KNOWLEDGE_DIRS.some(name => existsSync(join(dir, name))))
+    .filter(dir => existsSync(join(dir, 'manifest.yml')) || READABLE_KNOWLEDGE_DIRS.some(name => existsSync(join(dir, name))))
 }
 
 function assertUniqueModuleNames(dirs) {
@@ -792,7 +893,7 @@ function assertUniqueModuleNames(dirs) {
 }
 
 function cachePath(projectRoot, moduleName) {
-  return join(projectRoot, '.codewiki', 'cache', 'codewiki', encodeId(moduleName), 'retrieval-index.json')
+  return statePath(projectRoot, 'cache', 'codewiki', encodeId(moduleName), 'retrieval-index.json')
 }
 
 function writeBindings(result) {
@@ -815,13 +916,14 @@ function validateKnowledgeDocuments(knowledge, options = {}) {
       if (options.strictIds) errors.push(message)
       else warnings.push(`${message}，当前使用路径派生兼容 ID`)
     }
-    const idMatch = doc.id.match(/^kb:([^:]+):(product|frontend):([^:]+)$/)
+    const idMatch = doc.id.match(/^kb:([^:]+):(product|developer|frontend|quality):(.+)$/)
+    const idLayer = idMatch?.[2] === 'frontend' ? 'developer' : idMatch?.[2]
     if (requiresStableId && !doc.generated_id && !idMatch) {
-      const message = `${doc.path} 的 knowledge id 不符合 kb:<module>:<product|frontend>:<topic>: ${doc.id}`
+      const message = `${doc.path} 的 knowledge id 不符合 kb:<module>:<product|developer|quality>:<topic>: ${doc.id}`
       if (options.strictIds) errors.push(message)
       else warnings.push(message)
     }
-    if (requiresStableId && idMatch && (idMatch[1] !== options.moduleName || idMatch[2] !== doc.layer)) {
+    if (requiresStableId && idMatch && (idMatch[1] !== options.moduleName || idLayer !== doc.layer)) {
       const message = `${doc.path} 的 knowledge id 必须匹配 module=${options.moduleName} 和 layer=${doc.layer}: ${doc.id}`
       if (options.strictIds) errors.push(message)
       else warnings.push(message)
@@ -830,6 +932,24 @@ function validateKnowledgeDocuments(knowledge, options = {}) {
       for (const field of ['aliases', 'questions', 'entities']) {
         if (doc[field].length > 0) continue
         const message = `${doc.path} 缺少非空 ${field}`
+        if (options.strictIds) errors.push(message)
+        else warnings.push(message)
+      }
+    }
+    if (doc.layer === 'quality') {
+      if (doc.sources.length === 0) {
+        const message = `${doc.path} 缺少 sources 证据来源`
+        if (options.strictIds) errors.push(message)
+        else warnings.push(message)
+      }
+      const invalidSources = doc.sources.filter(source => !source?.ref || !QUALITY_SOURCE_TYPES.has(source?.type))
+      if (invalidSources.length > 0) {
+        const message = `${doc.path} 包含非法 sources；每项必须有受支持的 type 和非空 ref`
+        if (options.strictIds) errors.push(message)
+        else warnings.push(message)
+      }
+      if (doc.kind === 'defect' && !doc.sources.some(source => ['code', 'commit', 'test'].includes(source?.type))) {
+        const message = `${doc.path} 的 defect 至少需要 code、commit 或 test 证据之一`
         if (options.strictIds) errors.push(message)
         else warnings.push(message)
       }
@@ -851,9 +971,15 @@ function buildModuleIndex(projectRoot, moduleDir, options = {}) {
   if (knowledgeValidation.errors.length > 0) {
     throw new Error(`语义文档校验失败:\n- ${knowledgeValidation.errors.join('\n- ')}`)
   }
-  const graph = navigationGraph(moduleDir)
+  let graph = navigationGraph(moduleDir)
   addKnowledgeCodeReferenceNodes(graph, knowledge)
-  const normalizedBindings = normalizeBindings({ moduleDir, knowledge, graph })
+  graph = normalizeGraph(graph)
+  const normalizedBindings = normalizeBindings({
+    moduleDir,
+    knowledge,
+    graph,
+    acceptCurrentEvidence: Boolean(options.writeBindings && options.strictIds),
+  })
   const result = {
     moduleDir,
     bindingPath: normalizedBindings.bindingPath,
@@ -867,14 +993,16 @@ function buildModuleIndex(projectRoot, moduleDir, options = {}) {
       .filter(binding => binding.confidence === 'verified' || binding.confidence === 'ast')
       .map(binding => binding.knowledge_id))
     const ungrounded = knowledge
-      .filter(doc => KNOWLEDGE_DIRS.includes(doc.layer) && !stronglyBound.has(doc.id))
+      .filter(doc => ['product', 'developer'].includes(doc.layer) && !stronglyBound.has(doc.id))
       .map(doc => doc.path)
     if (ungrounded.length > 0) throw new Error(`语义文档缺少 verified/ast 代码证据:\n- ${ungrounded.join('\n- ')}`)
   }
   if (options.writeBindings) writeBindings(result)
-  const fingerprint = sourceFingerprint(projectRoot, moduleDir, moduleName)
   const baseCommit = manifestBaseCommit(moduleDir)
+  if (options.writeBindings) graph = writeGraph(moduleDir, graph, { module: moduleName, base_commit: baseCommit })
+  const fingerprint = sourceFingerprint(projectRoot, moduleDir, moduleName)
   const headCommit = currentCommit(projectRoot)
+  const freshness = bindingFreshness(normalizedBindings.bindings, knowledge)
   const index = {
     metadata: {
       version: INDEX_VERSION,
@@ -892,6 +1020,8 @@ function buildModuleIndex(projectRoot, moduleDir, options = {}) {
     nav_nodes: graph.nodes,
     nav_edges: graph.edges,
     bindings: normalizedBindings.bindings,
+    graph_stats: graphStats(graph),
+    knowledge_freshness: freshness,
     warnings: unique([...graph.warnings, ...normalizedBindings.warnings, ...knowledgeValidation.warnings]),
   }
   const outPath = cachePath(projectRoot, moduleName)
@@ -920,7 +1050,7 @@ function loadModuleIndex(projectRoot, moduleDir, options = {}) {
 export function buildProjectIndex(options = {}) {
   const projectRoot = resolve(options.projectRoot || process.cwd())
   const dirs = moduleDirs(projectRoot, options.module)
-  if (dirs.length === 0) throw new Error(`未找到 codewiki 知识库: ${options.module || join(projectRoot, MODULES_ROOT)}`)
+  if (dirs.length === 0) throw new Error(`未找到 codewiki 知识库: ${options.module || resolveKnowledgeRoot(projectRoot)}`)
   assertUniqueModuleNames(dirs)
   return dirs.map(moduleDir => buildModuleIndex(projectRoot, moduleDir, {
     writeBindings: options.writeBindings !== false,
@@ -930,6 +1060,10 @@ export function buildProjectIndex(options = {}) {
 
 export function clearRetrievalMemoryCache() {
   memoryIndexCache.clear()
+}
+
+export function inspectModuleIndex(projectRoot, moduleDir) {
+  return loadModuleIndex(resolve(projectRoot || process.cwd()), moduleDir, { rebuild: true })
 }
 
 function fieldScore(query, queryTerms, value, weight) {
@@ -943,6 +1077,8 @@ function fieldScore(query, queryTerms, value, weight) {
 }
 
 function knowledgeScore(doc, query, terms) {
+  if (doc.status === 'superseded' && !HISTORY_QUERY_PATTERN.test(query)) return Number.NEGATIVE_INFINITY
+  const statusPenalty = doc.status === 'resolved' && !HISTORY_QUERY_PATTERN.test(query) ? 8 : 0
   return (doc.layer === 'cases' ? 30 : 0)
     + fieldScore(query, terms, doc.title, 12)
     + fieldScore(query, terms, doc.aliases.join(' '), 10)
@@ -950,10 +1086,15 @@ function knowledgeScore(doc, query, terms) {
     + fieldScore(query, terms, doc.entities.join(' '), 6)
     + fieldScore(query, terms, doc.headings.join(' '), 4)
     + Math.min(fieldScore(query, terms, doc.plain, 1), 20)
+    - statusPenalty
 }
 
 function nodeScore(node, query, terms) {
-  const searchable = [node.label, node.name, node.text, node.file, node.endpoint, node.path, node.message].filter(Boolean).join(' ')
+  const searchable = [
+    node.label, node.name, node.qualified_name, node.text, node.file,
+    node.endpoint, node.route, node.method, node.path, node.message,
+    node.language, node.framework, node.source_unit,
+  ].filter(Boolean).join(' ')
   return fieldScore(query, terms, searchable, 3) + Number(node.importance || 0)
 }
 
@@ -969,6 +1110,7 @@ function excerpt(doc, query) {
 }
 
 function exploreModule(index, query, options = {}, freshness = {}) {
+  const queryRoute = options.route || routeQuery(query, options)
   const terms = tokenize(query)
   const candidateIds = unique(terms.flatMap(term => index.postings[term] || []))
   const candidates = candidateIds.length > 0
@@ -1018,7 +1160,7 @@ function exploreModule(index, query, options = {}, freshness = {}) {
       }
       if (current.depth >= 2) continue
       for (const next of adjacency.get(current.id) || []) {
-        if (next.edge.confidence < 0.4 || seen.has(next.node)) continue
+        if (next.edge.confidence < 0.4 || seen.has(next.node) || !edgeAllowed(queryRoute, next.edge)) continue
         seen.add(next.node)
         navQueue.push({ id: next.node, depth: current.depth + 1 })
       }
@@ -1039,9 +1181,9 @@ function exploreModule(index, query, options = {}, freshness = {}) {
   const supersededIds = new Set(directTopics.flatMap(item => item.doc.supersedes || []))
   const roots = unique([
     ...directTopics.flatMap(item => (bindingsByKnowledge.get(item.doc.id) || []).map(binding => binding.navigation_id)),
-    ...(directTopics.length === 0 ? technicalRootIds : strongTechnicalRootIds),
+    ...(queryRoute.route === 'graph-first' ? technicalRootIds.slice(0, 4) : directTopics.length === 0 ? technicalRootIds : strongTechnicalRootIds),
   ])
-  const maxDepth = options.detail === 'evidence' || /实现|调用|链路|代码|影响/.test(query) ? 3 : 2
+  const maxDepth = queryRoute.maxDepth
   const visited = new Map()
   const queue = roots.map(id => ({ id, depth: 0, path: [] }))
   while (queue.length > 0 && visited.size < 100) {
@@ -1050,7 +1192,7 @@ function exploreModule(index, query, options = {}, freshness = {}) {
     visited.set(current.id, current)
     if (current.depth >= maxDepth) continue
     for (const next of adjacency.get(current.id) || []) {
-      if (next.edge.confidence < 0.4) continue
+      if (next.edge.confidence < 0.4 || !edgeAllowed(queryRoute, next.edge)) continue
       queue.push({
         id: next.node,
         depth: current.depth + 1,
@@ -1084,6 +1226,7 @@ function exploreModule(index, query, options = {}, freshness = {}) {
       module: item.doc.module,
       title: item.doc.title,
       kind: item.doc.kind,
+      status: item.doc.status,
       path: item.doc.path,
       source: item.doc.overlay ? 'local-overlay' : item.doc.layer === 'cases' ? 'shared-case' : 'generated-doc',
       score: Number(item.score.toFixed(2)),
@@ -1125,6 +1268,8 @@ function exploreModule(index, query, options = {}, freshness = {}) {
 
   return {
     module: index.metadata.module,
+    intent: queryRoute.intent,
+    route: queryRoute.route,
     topics,
     paths,
     evidence,
@@ -1134,6 +1279,8 @@ function exploreModule(index, query, options = {}, freshness = {}) {
     dirty_files: freshness.dirty_files || [],
     committed_files: freshness.committed_files || [],
     freshness_unknown: Boolean(freshness.freshness_unknown),
+    knowledge_freshness: index.knowledge_freshness,
+    graph_stats: index.graph_stats,
     warnings: unique([
       ...index.warnings,
       ...(directTopics.length === 0 && technicalRootIds.length > 0 ? ['命中代码证据，但缺少对应语义文档'] : []),
@@ -1146,19 +1293,22 @@ export function exploreKnowledgeBase(options = {}) {
   if (!query) throw new Error('query 不能为空')
   const projectRoot = resolve(options.projectRoot || process.cwd())
   const dirs = moduleDirs(projectRoot, options.module)
-  if (dirs.length === 0) throw new Error(`未找到 codewiki 知识库: ${options.module || join(projectRoot, MODULES_ROOT)}`)
+  if (dirs.length === 0) throw new Error(`未找到 codewiki 知识库: ${options.module || resolveKnowledgeRoot(projectRoot)}`)
   assertUniqueModuleNames(dirs)
   const gitState = projectGitState(projectRoot)
+  const queryRoute = routeQuery(query, options)
   const moduleResults = dirs
     .map(moduleDir => {
       const index = loadModuleIndex(projectRoot, moduleDir, { rebuild: options.rebuild })
-      return exploreModule(index, query, options, moduleFreshness(index, gitState))
+      return exploreModule(index, query, { ...options, detail: queryRoute.detail, route: queryRoute }, moduleFreshness(index, gitState))
     })
     .filter(result => result.topics.length > 0 || result.evidence.length > 0)
     .sort((a, b) => (b.topics[0]?.score || 0) - (a.topics[0]?.score || 0))
     .slice(0, options.module ? 1 : 3)
   return {
     query,
+    intent: queryRoute.intent,
+    route: queryRoute.route,
     project_root: projectRoot,
     generated_at: new Date().toISOString(),
     modules: moduleResults,
@@ -1173,7 +1323,7 @@ function percentile(values, ratio) {
 }
 
 export function evaluateKnowledgeBase(options = {}) {
-  const cases = Array.isArray(options.cases) ? options.cases : []
+  const cases = (Array.isArray(options.cases) ? options.cases : []).filter(item => item?.status !== 'disabled' && item?.status !== 'archived')
   if (cases.length === 0) throw new Error('评测 cases 不能为空')
   const repeat = Math.max(1, Math.min(Number(options.repeat) || 1, 20))
   const durations = []
@@ -1212,6 +1362,8 @@ export function evaluateKnowledgeBase(options = {}) {
     const missingKnowledgeIds = expectedKnowledgeIds.filter(id => !knowledgeIds.includes(id))
     const missingEvidenceIds = requiredEvidenceIds.filter(id => !evidenceIds.includes(id))
     const forbiddenHits = forbiddenText.filter(text => formatted.includes(text))
+    const expectedIntent = item.expected_intent || item.expectedIntent || null
+    const intentMismatch = expectedIntent ? expectedIntent !== explored.intent : false
     const expectedFound = item.expect_found ?? item.expectFound
     const foundMismatch = expectedFound == null ? false : Boolean(expectedFound) !== explored.found
     expectedKnowledgeTotal += expectedKnowledgeIds.length
@@ -1219,10 +1371,16 @@ export function evaluateKnowledgeBase(options = {}) {
     requiredEvidenceTotal += requiredEvidenceIds.length
     requiredEvidenceHits += requiredEvidenceIds.length - missingEvidenceIds.length
     results.push({
+      id: item.id || `eval:${item.module || 'all'}:${sha1(`${item.module || ''}\n${item.query}`).slice(0, 12)}`,
       name: item.name || `case-${caseIndex + 1}`,
+      module: item.module || options.module || null,
       query: item.query,
-      pass: missingKnowledgeIds.length === 0 && missingEvidenceIds.length === 0 && forbiddenHits.length === 0 && !foundMismatch,
+      gap_ids: asStringArray(item.gap_ids || item.gapIds),
+      pass: missingKnowledgeIds.length === 0 && missingEvidenceIds.length === 0 && forbiddenHits.length === 0 && !foundMismatch && !intentMismatch,
       found: explored.found,
+      intent: explored.intent,
+      expected_intent: expectedIntent,
+      intent_mismatch: intentMismatch,
       knowledge_ids: knowledgeIds,
       evidence_ids: evidenceIds,
       missing_knowledge_ids: missingKnowledgeIds,
@@ -1254,7 +1412,7 @@ export function evaluateKnowledgeBase(options = {}) {
 
 export function formatExploreResult(result) {
   if (!result.found) return `没有在 codewiki 知识库中找到与“${result.query}”相关的内容。`
-  const lines = [`# codewiki 检索：${result.query}`]
+  const lines = [`# codewiki 检索：${result.query}`, `\n> 路由：${result.intent || 'semantic'}（${result.route || 'document-first'}）`]
   for (const module of result.modules) {
     lines.push(`\n## 模块：${module.module}`)
     if (module.stale) {

@@ -1,0 +1,41 @@
+name: Update codewiki
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * 1-5"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g codewiki
+      - name: Analyze knowledge impact
+        run: codewiki generate "${{ vars.CODEWIKI_TARGET || 'src' }}" --module "${{ vars.CODEWIKI_MODULE || 'app' }}" --update --json > /tmp/codewiki-impact.json
+      - name: Require semantic authoring when business knowledge changed
+        run: |
+          node -e "const p=require('/tmp/codewiki-impact.json'); if(p.impact.classification==='KNOWLEDGE_IMPACT'){console.error('Business knowledge changed. Run the codewiki-generate Skill in Codex or Claude Code before finalizing.'); process.exit(1)}"
+      - name: Finalize and evaluate
+        run: codewiki generate "${{ vars.CODEWIKI_TARGET || 'src' }}" --module "${{ vars.CODEWIKI_MODULE || 'app' }}" --finalize
+      - name: Confidence report
+        run: codewiki confidence --module "${{ vars.CODEWIKI_MODULE || 'app' }}" --json > /tmp/codewiki-confidence.json
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: codewiki/automated-update
+          delete-branch: true
+          title: "docs(codewiki): update business knowledge"
+          commit-message: "docs(codewiki): update business knowledge"
+          body: |
+            Automated codewiki update after source changes.
+
+            Review changed Markdown, Evidence freshness, and retrieval cases before merging.

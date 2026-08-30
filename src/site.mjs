@@ -1,6 +1,6 @@
-// codewiki site — 把 .codewiki/modules/<module> 的 Markdown 知识库渲染成交互式 HTML 站点。
+// codewiki site — 把共享知识根目录中的 Markdown 知识库渲染成交互式 HTML 站点。
 //
-// 产物（.codewiki/site/）：
+// 产物（<state_root>/site/）：
 //   index.html        模块总览（评级徽章、文档统计、全局搜索）
 //   <module>.html     模块页（侧边栏文档导航 + 折叠章节 + 证据高亮 + mermaid）
 //   site-data.json    客户端搜索索引
@@ -9,9 +9,11 @@
 // 本地渲染的浏览视图 —— LLM 只写 Markdown，不产生任何 HTML token 成本。
 // Markdown→HTML 用 marked（GFM 表格/嵌套列表等边缘情况保真度优于手写渲染器）。
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, join, relative } from 'node:path'
 import { marked } from 'marked'
-import { MODULES_ROOT, moduleDirs, moduleNameFromManifest } from './scan/knowledge-retrieval.mjs'
+import { moduleDirs, moduleNameFromManifest } from './scan/knowledge-retrieval.mjs'
+import { knowledgeRootRelative, statePath } from './config.mjs'
+import { graphStats, readGraph } from './graph/store.mjs'
 
 marked.setOptions({ gfm: true, breaks: false })
 
@@ -53,7 +55,7 @@ function parseFrontmatter(content) {
 
 // 证据引用（path/file.ext:123）渲染为可复制的高亮 chip
 function withEvidenceChips(html) {
-  return html.replace(/([^<"'\w])([\w./@-]+\.(?:vue|ts|js|tsx|jsx|mjs|cjs|json|yml|yaml)):(\d+)\b/g,
+  return html.replace(/([^<"'\w])([\w./@-]+\.(?:vue|ts|js|tsx|jsx|mjs|cjs|java|go|json|yml|yaml)):(\d+)\b/g,
     '$1<span class="ev">$2:$3</span>')
 }
 
@@ -71,16 +73,25 @@ function slugify(text) {
 
 function collectDocs(moduleDir) {
   const docs = []
-  for (const layer of ['product', 'frontend']) {
-    const dir = join(moduleDir, layer)
+  for (const [sourceLayer, layer] of [['product', 'product'], ['developer', 'developer'], ['frontend', 'developer'], ['quality', 'quality']]) {
+    const dir = join(moduleDir, sourceLayer)
     if (!existsSync(dir)) continue
-    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-      if (!entry.isFile() || !entry.name.endsWith('.md')) continue
-      const { data, body } = parseFrontmatter(readFileSync(join(dir, entry.name), 'utf8'))
+    const files = []
+    const walk = current => {
+      for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const filePath = join(current, entry.name)
+        if (entry.isDirectory()) walk(filePath)
+        else if (entry.isFile() && entry.name.endsWith('.md')) files.push(filePath)
+      }
+    }
+    walk(dir)
+    for (const filePath of files) {
+      const file = relative(moduleDir, filePath).replace(/\\/g, '/')
+      const { data, body } = parseFrontmatter(readFileSync(filePath, 'utf8'))
       docs.push({
         layer,
-        file: `${layer}/${entry.name}`,
-        title: data.title || entry.name.replace(/\.md$/, ''),
+        file,
+        title: data.title || basename(filePath).replace(/\.md$/, ''),
         aliases: Array.isArray(data.aliases) ? data.aliases : [],
         questions: Array.isArray(data.questions) ? data.questions : [],
         body,
@@ -103,10 +114,38 @@ function moduleGrade(moduleDir) {
 }
 
 function countNavNodes(moduleDir) {
+  const unified = readGraph(moduleDir)
+  if (unified) return unified.nodes.length
   try {
     const graph = JSON.parse(readFileSync(join(moduleDir, 'navigation', 'file-graph.json'), 'utf8'))
     return graph?.data?.nodes?.length || 0
   } catch { return 0 }
+}
+
+function moduleGraph(moduleDir) {
+  const graph = readGraph(moduleDir)
+  return graph ? graphStats(graph) : { nodes: countNavNodes(moduleDir), edges: 0, node_types: {}, edge_types: {} }
+}
+
+function moduleFreshness(moduleDir) {
+  const filePath = join(moduleDir, 'navigation', 'bindings.jsonl')
+  if (!existsSync(filePath)) return { current: 0, stale: 0, unverified: 0, total: 0 }
+  const byKnowledge = new Map()
+  for (const line of readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean)) {
+    try {
+      const binding = JSON.parse(line)
+      const statuses = byKnowledge.get(binding.knowledge_id) || []
+      statuses.push(binding.freshness || 'unverified')
+      byKnowledge.set(binding.knowledge_id, statuses)
+    } catch {}
+  }
+  const result = { current: 0, stale: 0, unverified: 0, total: byKnowledge.size }
+  for (const statuses of byKnowledge.values()) {
+    if (statuses.includes('stale')) result.stale++
+    else if (statuses.length > 0 && statuses.every(status => status === 'current')) result.current++
+    else result.unverified++
+  }
+  return result
 }
 
 const CSS = `
@@ -187,7 +226,7 @@ ${headExtra || ''}
 ${sidebar ? `<nav class="sidebar">${sidebar}</nav>` : ''}
 <main class="content">
 ${body}
-<div class="footer">由 codewiki 生成 · 数据来自本地知识库 .codewiki/</div>
+<div class="footer">由 codewiki 生成 · 知识源可随 Git 共享，站点产物仅保存在本地</div>
 </main>
 </div>
 </body>
@@ -199,22 +238,23 @@ function gradeBadge(grade) {
   return `<span class="badge" style="background:${GRADE_COLORS[grade] || GRADE_COLORS.N_A}">${grade === 'N_A' ? '未评估' : grade}</span>`
 }
 
-function moduleSidebar(module, docs) {
-  const groups = ['product', 'frontend']
+function moduleSidebar(module, docs, knowledgeRoot) {
+  const labels = { product: '业务语义层', developer: '研发实现层', quality: '质量知识层' }
+  const groups = ['product', 'developer', 'quality']
     .map(layer => {
       const items = docs.filter(doc => doc.layer === layer)
       if (items.length === 0) return ''
-      return `<div class="group"><div class="group-label">${layer === 'product' ? '业务语义层' : '前端架构层'}</div>` +
+      return `<div class="group"><div class="group-label">${labels[layer]}</div>` +
         items.map(doc => `<a href="#${slugify(doc.file)}">${escapeHtml(doc.title)}</a>`).join('') + '</div>'
     })
     .join('')
   return `<h1>${escapeHtml(module)}</h1>
-<div class="crumb">${MODULES_ROOT}/${escapeHtml(module)}</div>
+<div class="crumb">${escapeHtml(knowledgeRoot)}/${escapeHtml(module)}</div>
 <input type="search" placeholder="筛选本文档…" oninput="filterDocs(this)">
-<div class="doc-list">${groups || '<div class="crumb">暂无语义文档 — 运行 /wiki-scan 生成</div>'}</div>`
+<div class="doc-list">${groups || '<div class="crumb">暂无语义文档 — 使用 codewiki-generate Skill 生成</div>'}</div>`
 }
 
-function renderModulePage({ module, docs, grade, navNodes }) {
+function renderModulePage({ module, docs, grade, graph, freshness, knowledgeRoot }) {
   const sections = docs.map(doc => {
     const firstQuestion = doc.questions[0] ? `<div class="crumb" style="color:var(--muted);font-size:12px;margin:4px 18px 0">${escapeHtml(doc.questions[0])}</div>` : ''
     return `<details class="doc-section" id="${slugify(doc.file)}" open>
@@ -227,28 +267,34 @@ ${firstQuestion}
 <h1>${escapeHtml(module)} ${gradeBadge(grade.grade)}</h1>
 <div class="meta-row">
   <span>评级${grade.score != null ? ` ${grade.score}` : ''}</span>
-  <span>${docs.length} 篇语义文档</span>
-  <span>${navNodes} 个导航节点</span>
+  <span>${docs.length} 篇知识文档</span>
+  <span>${graph.nodes} 个导航节点 / ${graph.edges} 条关系</span>
+  <span>知识新鲜度 current=${freshness.current}/${freshness.total} · stale=${freshness.stale}</span>
   ${grade.status ? `<span>证据校验：${escapeHtml(grade.status)}</span>` : '<span>未运行 --validate</span>'}
   ${grade.validatedAt ? `<span>校验于 ${escapeHtml(grade.validatedAt.slice(0, 10))}</span>` : ''}
 </div>
 <a href="index.html">← 返回模块总览</a>
-${sections || '<p>该模块暂无 product/frontend 语义文档。</p>'}
+<div class="card" style="margin:20px 0">
+  <h3>结构索引</h3>
+  <div class="stats">节点：${Object.entries(graph.node_types).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([type, count]) => `${escapeHtml(type)} ${count}`).join(' · ') || '暂无'}</div>
+  <div class="stats">关系：${Object.entries(graph.edge_types).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([type, count]) => `${escapeHtml(type)} ${count}`).join(' · ') || '暂无'}</div>
+</div>
+${sections || '<p>该模块暂无 product/developer/quality 知识文档。</p>'}
 `
   return pageHtml({
     title: module,
     body,
-    sidebar: moduleSidebar(module, docs),
+    sidebar: moduleSidebar(module, docs, knowledgeRoot),
     headExtra: '<script type="module">try{import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs").then(m=>m.default.initialize({startOnLoad:true,theme:"dark"}))}catch(e){document.querySelectorAll("pre.mermaid").forEach(p=>p.textContent="mermaid 图需要网络加载渲染库\\n\\n"+p.textContent)}</script>',
   })
 }
 
-function renderIndexPage(modules) {
+function renderIndexPage(modules, knowledgeRoot) {
   const cards = modules.map(m => `
 <div class="card">
   <h3><a href="${m.name}.html">${escapeHtml(m.name)}</a> ${gradeBadge(m.grade.grade)}</h3>
   <div class="stats">
-    ${m.docs.length} 篇语义文档 · ${m.navNodes} 个导航节点
+    ${m.docs.length} 篇知识文档 · ${m.graph.nodes} 个导航节点 · current ${m.freshness.current}/${m.freshness.total}
     ${m.grade.status ? ` · 校验 ${escapeHtml(m.grade.status)}` : ' · 未校验'}
   </div>
   ${m.docs.slice(0, 3).map(doc => `<div class="stats">· ${escapeHtml(doc.title)}</div>`).join('')}
@@ -257,21 +303,22 @@ function renderIndexPage(modules) {
 <div class="crumb">模块知识库总览</div>
 <input type="search" placeholder="全局搜索（标题/别名/问题/正文）…" oninput="globalSearch(this)">
 <div id="search-results" class="hidden" style="margin-bottom:14px"></div>
-<div class="doc-list">${modules.map(m => `<div class="group"><a href="${m.name}.html">${escapeHtml(m.name)}</a></div>`).join('') || '<div class="crumb">暂无模块 — 运行 codewiki scan 或 /wiki-scan</div>'}</div>`
+<div class="doc-list">${modules.map(m => `<div class="group"><a href="${m.name}.html">${escapeHtml(m.name)}</a></div>`).join('') || '<div class="crumb">暂无模块 — 运行 codewiki generate</div>'}</div>`
   const body = `
 <h1>知识库模块</h1>
-<div class="meta-row"><span>${modules.length} 个模块</span><span>位置 ${MODULES_ROOT}/</span></div>
-<div class="cards">${cards || '<p>暂无模块。在 Claude Code 中运行 /wiki-scan，或执行 codewiki scan &lt;target&gt;。</p>'}</div>
+<div class="meta-row"><span>${modules.length} 个模块</span><span>位置 ${escapeHtml(knowledgeRoot)}/</span></div>
+<div class="cards">${cards || '<p>暂无模块。使用 codewiki-generate Skill，或执行 codewiki generate &lt;target&gt;。</p>'}</div>
 `
   return pageHtml({ title: '模块总览', body, sidebar })
 }
 
 export function renderSite(projectRoot, options = {}) {
   const dirs = moduleDirs(projectRoot, options.module)
+  const knowledgeRoot = knowledgeRootRelative(projectRoot)
   if (dirs.length === 0) {
-    throw new Error(`未找到知识库模块（期望 ${MODULES_ROOT}/<module>）；先运行 codewiki scan 或 /wiki-scan`)
+    throw new Error(`未找到知识库模块（期望 ${knowledgeRoot}/<module>）；先运行 codewiki generate 或 codewiki-generate Skill`)
   }
-  const outDir = join(projectRoot, '.codewiki', 'site')
+  const outDir = statePath(projectRoot, 'site')
   mkdirSync(outDir, { recursive: true })
   const modules = []
   const searchIndex = []
@@ -279,9 +326,10 @@ export function renderSite(projectRoot, options = {}) {
     const name = moduleNameFromManifest(dir) || basename(dir)
     const docs = collectDocs(dir)
     const grade = moduleGrade(dir)
-    const navNodes = countNavNodes(dir)
-    modules.push({ name, docs, grade, navNodes })
-    writeFileSync(join(outDir, `${encodeURIComponent(name)}.html`), renderModulePage({ module: name, docs, grade, navNodes }), 'utf8')
+    const graph = moduleGraph(dir)
+    const freshness = moduleFreshness(dir)
+    modules.push({ name, docs, grade, graph, freshness })
+    writeFileSync(join(outDir, `${encodeURIComponent(name)}.html`), renderModulePage({ module: name, docs, grade, graph, freshness, knowledgeRoot }), 'utf8')
     for (const doc of docs) {
       searchIndex.push({
         module: name,
@@ -295,7 +343,7 @@ export function renderSite(projectRoot, options = {}) {
       })
     }
   }
-  writeFileSync(join(outDir, 'index.html'), renderIndexPage(modules), 'utf8')
+  writeFileSync(join(outDir, 'index.html'), renderIndexPage(modules, knowledgeRoot), 'utf8')
   writeFileSync(join(outDir, 'site-data.json'), JSON.stringify(searchIndex), 'utf8')
-  return { outDir, modules: modules.map(m => ({ name: m.name, docs: m.docs.length, grade: m.grade.grade, navNodes: m.navNodes })) }
+  return { outDir, modules: modules.map(m => ({ name: m.name, docs: m.docs.length, grade: m.grade.grade, navNodes: m.graph.nodes, graph: m.graph, freshness: m.freshness })) }
 }

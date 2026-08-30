@@ -3,20 +3,21 @@ import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { createHash } from 'node:crypto'
-import { exploreKnowledgeBase, formatExploreResult, tokenize, MODULES_ROOT } from './knowledge-retrieval.mjs'
+import { exploreKnowledgeBase, formatExploreResult, moduleDirs, tokenize } from './knowledge-retrieval.mjs'
+import { statePath } from '../config.mjs'
+import { createRetrievalId, openGap } from '../quality-state.mjs'
 
 const PROTOCOL_VERSION = '2024-11-05'
 const EVIDENCE_QUERY_PATTERN = /怎么实现|如何实现|代码|调用链|字段.{0,20}(?:来源|从|哪个接口)|影响|如何修改|怎么改|改动/
 
 const TOOL = {
   name: 'codewiki_explore',
-  description: '优先检索 codewiki 的业务/技术语义文档，再沿 AST Navigation 扩展代码证据和相关语义。适合回答按钮行为、业务规则、状态、字段来源和改动影响。',
+  description: '优先检索 codewiki 的业务/技术语义文档，再沿 AST Navigation 扩展代码证据和相关语义。适合回答按钮行为、业务规则、状态、字段来源和改动影响。每次调用都会返回 retrieval_id 和 feedback_request；调用方在基于结果回答后必须向用户询问“有帮助 / 没帮助”。',
   inputSchema: {
     type: 'object',
     properties: {
       query: { type: 'string', description: '用户问题或要检索的业务/技术概念' },
-      module: { type: 'string', description: '可选，限定 docs/<module>' },
+      module: { type: 'string', description: '可选，限定知识库模块名' },
       detail: { type: 'string', enum: ['semantic', 'evidence'], description: '可选；省略时根据问题自动选择。实现、代码、调用链、字段来源和影响分析类问题使用 evidence，其余使用 semantic' },
       maxTopics: { type: 'integer', minimum: 1, maximum: 10, default: 5 },
       projectPath: { type: 'string', description: '可选，项目根目录；默认 MCP 当前工作目录' },
@@ -39,15 +40,7 @@ function failure(id, code, message) {
 }
 
 function fallbackRoots(projectRoot, moduleName) {
-  const modulesRoot = join(projectRoot, MODULES_ROOT)
-  if (moduleName) {
-    const moduleDir = join(modulesRoot, moduleName)
-    return existsSync(moduleDir) ? [moduleDir] : []
-  }
-  if (!existsSync(modulesRoot)) return []
-  return readdirSync(modulesRoot, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
-    .map(entry => join(modulesRoot, entry.name))
+  return moduleDirs(projectRoot, moduleName)
 }
 
 function fallbackFiles(root, output = []) {
@@ -107,15 +100,19 @@ function resolveDetail(query, detail) {
 
 function recordRetrieval(projectRoot, record) {
   try {
-    const logPath = join(projectRoot, '.codewiki', 'retrieval.jsonl')
+    const logPath = statePath(projectRoot, 'retrieval.jsonl')
     mkdirSync(dirname(logPath), { recursive: true })
     appendFileSync(logPath, `${JSON.stringify(record)}\n`, 'utf8')
   } catch {}
 }
 
-function retrievalId(messageId, query, at) {
-  const value = `${messageId}\0${query}\0${at}\0${process.pid}`
-  return `ret_${createHash('sha1').update(value).digest('hex').slice(0, 16)}`
+function feedbackRequest(retrievalId) {
+  return {
+    retrieval_id: retrievalId,
+    required: true,
+    prompt: '这次 CodeWiki 检索有帮助吗？请回复“有帮助”，或“没帮助：原因”。',
+    accepted_ratings: ['good', 'bad'],
+  }
 }
 
 async function handle(message) {
@@ -125,7 +122,7 @@ async function handle(message) {
     result(message.id, {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: 'codewiki', version: '1.0.0' },
+      serverInfo: { name: 'codewiki', version: '0.2.0' },
     })
     return
   }
@@ -156,14 +153,21 @@ async function handle(message) {
         projectRoot,
       })
       const fallback = explored.found ? '' : fallbackExplore({ query: args.query, module: args.module, projectRoot })
-      const text = fallback || formatExploreResult(explored)
+      const baseText = fallback || formatExploreResult(explored)
       const latencyMs = Number((performance.now() - startedAt).toFixed(3))
       const at = new Date().toISOString()
       const knowledgeIds = [...new Set(explored.modules.flatMap(item => item.topics.map(topic => topic.id)))]
       const evidenceIds = [...new Set(explored.modules.flatMap(item => item.evidence.map(evidence => evidence.id)))]
       const modules = explored.modules.map(item => item.module)
       const stale = explored.modules.some(item => item.stale)
-      const traceId = retrievalId(message.id, args.query, at)
+      const traceId = createRetrievalId({ query: args.query, at, nonce: `${message.id}\n${process.pid}` })
+      const gapId = explored.found ? null : openGap(projectRoot, {
+        module: args.module || modules[0] || 'unknown',
+        query: args.query,
+        kind: 'retrieval_miss',
+        retrievalId: traceId,
+        at,
+      })
       const trace = {
         retrieval_id: traceId,
         at,
@@ -177,13 +181,17 @@ async function handle(message) {
         knowledge_ids: knowledgeIds,
         evidence_ids: evidenceIds,
         overlay_knowledge_ids: knowledgeIds.filter(id => id.startsWith('kb-case:')),
+        intent: explored.intent,
+        route: explored.route,
         detail,
         stale,
         latency_ms: latencyMs,
+        ...(gapId ? { gap_id: gapId } : {}),
       }
       recordRetrieval(projectRoot, trace)
+      const feedback = feedbackRequest(traceId)
       result(message.id, {
-        content: [{ type: 'text', text }],
+        content: [{ type: 'text', text: `${baseText}\n\n---\n${feedback.prompt}` }],
         structuredContent: {
           retrieval_id: traceId,
           query: args.query,
@@ -191,10 +199,14 @@ async function handle(message) {
           modules,
           knowledge_ids: knowledgeIds,
           evidence_ids: evidenceIds,
+          intent: explored.intent,
+          route: explored.route,
           detail,
           stale,
           latency_ms: latencyMs,
           fallback: Boolean(fallback),
+          feedback_request: feedback,
+          ...(gapId ? { gap_id: gapId } : {}),
         },
       })
     } catch (error) {
@@ -205,8 +217,15 @@ async function handle(message) {
         : ''
       if (fallback) {
         const at = new Date().toISOString()
-        const traceId = retrievalId(message.id, args.query, at)
+        const traceId = createRetrievalId({ query: args.query, at, nonce: `${message.id}\n${process.pid}` })
         const detail = resolveDetail(args.query, args.detail)
+        const gapId = openGap(projectRoot, {
+          module: args.module || 'unknown',
+          query: args.query,
+          kind: 'retrieval_miss',
+          retrievalId: traceId,
+          at,
+        })
         recordRetrieval(projectRoot, {
           retrieval_id: traceId,
           at,
@@ -223,9 +242,10 @@ async function handle(message) {
           overlay_knowledge_ids: [],
           detail,
           stale: false,
+          gap_id: gapId,
         })
         result(message.id, {
-          content: [{ type: 'text', text: fallback }],
+          content: [{ type: 'text', text: `${fallback}\n\n---\n${feedbackRequest(traceId).prompt}` }],
           structuredContent: {
             retrieval_id: traceId,
             query: args.query,
@@ -237,6 +257,8 @@ async function handle(message) {
             stale: false,
             fallback: true,
             degraded_from_error: true,
+            gap_id: gapId,
+            feedback_request: feedbackRequest(traceId),
           },
         })
       } else {

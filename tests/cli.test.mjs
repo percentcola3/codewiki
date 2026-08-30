@@ -64,13 +64,44 @@ function runCli(args, cwd) {
   return execFileSync(process.execPath, [bin, ...args], { encoding: 'utf8', cwd, timeout: 120000 })
 }
 
-test('codewiki scan runs the full AST pipeline and produces navigation outputs', { timeout: 120000 }, () => {
+test('CLI exposes only project lifecycle commands to users', () => {
+  const help = runCli(['help'], root)
+  assert.equal(runCli(['--help'], root), help)
+  for (const command of ['init', 'upgrade', 'uninstall']) {
+    assert.match(help, new RegExp(`npx codewiki ${command}(?: |\\n)`))
+  }
+  for (const command of ['generate', 'query', 'preview', 'confidence', 'scan', 'index', 'evaluate', 'feedback', 'knowledge', 'eval', 'report', 'site', 'mcp']) {
+    assert.doesNotMatch(help, new RegExp(`codewiki ${command}(?: |\\n)`))
+  }
+  assert.match(help, /Claude Code 或 Codex/)
+  assert.match(help, /知识检索通过 MCP 完成/)
+  assert.doesNotMatch(help, /with-mcp/)
+  const removed = spawnSync(process.execPath, [bin, 'index'], { cwd: root, encoding: 'utf8' })
+  assert.equal(removed.status, 1)
+  assert.match(removed.stderr, /未知命令: index/)
+
   const projectDir = vueFixture()
   try {
-    const output = runCli(['scan', 'src', '--output', '.codewiki/modules/order'], projectDir)
-    assert.ok(output.length >= 0)
+    const notInitialized = spawnSync(process.execPath, [bin, 'upgrade'], { cwd: projectDir, encoding: 'utf8' })
+    assert.equal(notInitialized.status, 1)
+    assert.match(notInitialized.stderr, /请先运行 npx codewiki init/)
+    const escapedProject = spawnSync(process.execPath, [bin, 'generate', 'src', '--module', 'order', '--project', projectDir], { cwd: projectDir, encoding: 'utf8' })
+    assert.equal(escapedProject.status, 1)
+    assert.match(escapedProject.stderr, /--project 只允许用于 init、upgrade 和 uninstall/)
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('codewiki generate runs the full AST pipeline and produces navigation outputs', { timeout: 120000 }, () => {
+  const projectDir = vueFixture()
+  try {
+    const output = runCli(['generate', 'src', '--module', 'order', '--json'], projectDir)
+    const generated = JSON.parse(output)
+    assert.equal(generated.module, 'order')
+    assert.equal(generated.impact.classification, 'KNOWLEDGE_IMPACT')
     const navDir = join(projectDir, '.codewiki', 'modules', 'order', 'navigation')
-    for (const file of ['file-graph.json', 'func-dependencies.json', 'component-refs.json', 'clusters.json', 'deep-analysis.json']) {
+    for (const file of ['file-graph.json', 'func-dependencies.json', 'component-refs.json', 'clusters.json', 'deep-analysis.json', 'graph.jsonl']) {
       assert.ok(existsSync(join(navDir, file)), `missing ${file}`)
     }
     const fileGraph = JSON.parse(readFileSync(join(navDir, 'file-graph.json'), 'utf8'))
@@ -86,10 +117,10 @@ test('codewiki scan runs the full AST pipeline and produces navigation outputs',
   }
 })
 
-test('codewiki scan --validate writes validation report with per-file confidence', { timeout: 120000 }, () => {
+test('codewiki generate --finalize writes validation report with per-file confidence', { timeout: 120000 }, () => {
   const projectDir = vueFixture()
   try {
-    runCli(['scan', 'src', '--output', '.codewiki/modules/order'], projectDir)
+    runCli(['generate', 'src', '--module', 'order'], projectDir)
     write(join(projectDir, '.codewiki', 'modules', 'order', 'product', '01-导出-flow.md'), [
       '---',
       'id: kb:order:product:export',
@@ -105,7 +136,7 @@ test('codewiki scan --validate writes validation report with per-file confidence
       '',
       '点击导出按钮触发导出，见 src/views/order/list.vue:3。',
     ].join('\n'))
-    const result = spawnSync(process.execPath, [bin, 'scan', 'src', '.codewiki/modules/order', '--validate'], {
+    const result = spawnSync(process.execPath, [bin, 'generate', 'src', '--module', 'order', '--finalize'], {
       cwd: projectDir,
       encoding: 'utf8',
       timeout: 120000,
@@ -117,6 +148,29 @@ test('codewiki scan --validate writes validation report with per-file confidence
     assert.ok(Array.isArray(report.per_file_confidence))
     assert.ok(report.per_file_confidence.some(item => item.doc.includes('01-导出-flow')))
     assert.ok(existsSync(join(projectDir, '.codewiki', 'knowledge-health', 'order', 'confidence-history.jsonl')))
+
+    const update = JSON.parse(runCli(['generate', 'src', '--module', 'order', '--update', '--json'], projectDir))
+    assert.equal(update.impact.classification, 'NO_IMPACT')
+    assert.deepEqual(update.impact.knowledge_ids, [])
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('failed finalize restores the pre-generation module and keeps the failed snapshot', { timeout: 120000 }, () => {
+  const projectDir = vueFixture()
+  try {
+    runCli(['generate', 'src', '--module', 'order'], projectDir)
+    const moduleDir = join(projectDir, '.codewiki', 'modules', 'order')
+    write(join(moduleDir, 'product', 'invalid.md'), '# 缺少稳定知识元数据\n\n见 src/views/order/list.vue:3。\n')
+    const result = spawnSync(process.execPath, [bin, 'generate', 'src', '--module', 'order', '--finalize'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      timeout: 120000,
+    })
+    assert.notEqual(result.status, 0)
+    assert.equal(existsSync(moduleDir), false)
+    assert.ok(existsSync(join(projectDir, '.codewiki', 'transactions', 'order', 'failed', 'product', 'invalid.md')))
   } finally {
     rmSync(projectDir, { recursive: true, force: true })
   }
@@ -125,7 +179,7 @@ test('codewiki scan --validate writes validation report with per-file confidence
 test('codewiki confidence grades a module end to end', { timeout: 120000 }, () => {
   const projectDir = vueFixture()
   try {
-    runCli(['scan', 'src', '--output', '.codewiki/modules/order'], projectDir)
+    runCli(['generate', 'src', '--module', 'order'], projectDir)
     write(join(projectDir, '.codewiki', 'modules', 'order', 'product', '01-导出-flow.md'), [
       '---',
       'id: kb:order:product:export',
@@ -142,7 +196,7 @@ test('codewiki confidence grades a module end to end', { timeout: 120000 }, () =
       '见 src/views/order/list.vue:3。',
     ].join('\n'))
     write(join(projectDir, '.codewiki', 'modules', 'order', 'manifest.yml'), 'module: order\n')
-    spawnSync(process.execPath, [bin, 'scan', 'src', '.codewiki/modules/order', '--validate'], { cwd: projectDir, encoding: 'utf8', timeout: 120000 })
+    spawnSync(process.execPath, [bin, 'generate', 'src', '--module', 'order', '--finalize'], { cwd: projectDir, encoding: 'utf8', timeout: 120000 })
     // 模拟两条检索命中记录：一条命中、一条未命中
     write(join(projectDir, '.codewiki', 'retrieval.jsonl'), [
       JSON.stringify({ at: new Date().toISOString(), query: '导出按钮怎么实现', module: 'order', modules: ['order'], found: true, fallback: false, stale: false, latency_ms: 4, knowledge_ids: [], evidence_ids: [] }),
@@ -159,8 +213,10 @@ test('codewiki confidence grades a module end to end', { timeout: 120000 }, () =
     assert.ok(['A', 'B', 'C', 'D', 'E', 'N_A'].includes(module.overall_confidence.grade))
     // human 输出模式
     const text = runCli(['confidence'], projectDir)
-    assert.ok(text.includes('模块：order'))
-    assert.ok(text.includes('综合评级'))
+    assert.ok(text.includes('## order'))
+    assert.ok(text.includes('历史检索问题'))
+    assert.ok(text.includes('| Case |'))
+    assert.ok(text.includes('| Gap |'))
   } finally {
     rmSync(projectDir, { recursive: true, force: true })
   }

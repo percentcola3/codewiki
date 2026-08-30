@@ -1,6 +1,6 @@
 # codewiki · 三层文档生成（Step 2.7.5 / 3 / 4 / 4.5）
 
-主文件确认深度分析结果后，按本文件生成 Layer 1（Product）/ Layer 2（Frontend）/ navigation 入口，再回到主文件 Step 5 写 manifest 与自检。
+主文件确认深度分析结果后，按本文件生成 Layer 1（Product）/ Layer 2（Developer）/ navigation 入口，再回到主文件 Step 5 写 manifest 与自检。
 
 **v3.6 变化**：产品层从 9 章 → 3 大块；技术层从 6 文件 → 3 文件；新增 Step 2.7.5 字段级溯源生成（field-lineage/*）。
 
@@ -18,11 +18,11 @@ Step 2.7 输出 `_intermediate/flows.json` 后进入本步，产 `field-lineage/
 ### 2.7.5.2 脚本执行序（严格顺序）
 
 ```
-1. codewiki scan 内置（nav-parser 阶段）          # 产 _intermediate/field-candidates.json + graph-index.json (含 structuralFingerprint)
-2. codewiki scan 内置（pinia-tracker 阶段）       # 产 _intermediate/pinia-stores.json
-3. codewiki scan 内置（data-shape-tracer 阶段）            # 产 _intermediate/api-payload-shapes.json
+1. npx codewiki generate 内置（nav-parser 阶段）      # 产 _intermediate/field-candidates.json + graph-index.json (含 structuralFingerprint)
+2. npx codewiki generate 内置（pinia-tracker 阶段）   # 产 _intermediate/pinia-stores.json
+3. npx codewiki generate 内置（data-shape-tracer 阶段） # 产 _intermediate/api-payload-shapes.json
 4. Step 2.6/2.7/2.9 主 skill 编排 → 主 skill 显式落 _intermediate/flows.json
-5. codewiki scan 内置（field-lineage 阶段）       # 产 field-lineage/* 并回填 graph-index.json 的 fieldFingerprint
+5. npx codewiki generate 内置（field-lineage 阶段）   # 产 field-lineage/* 并回填 graph-index.json 的 fieldFingerprint
 ```
 
 若某中间产物缺失，`field-lineage.mjs` 会降级：无 `pinia-stores.json` → 全部字段标 `coverage: static`；无 `api-payload-shapes.json` → 全部字段 `source_apis: []` `coverage 至多 short`；无 `flows.json` → `coverage: full` 判定条件（a）失效但其他条件仍生效。
@@ -52,7 +52,7 @@ confidence：`A`（AST 逐字段直证）/ `B`（AST 候选经 LLM 读码补证�
 subagent 返回结构化 JSON（对齐 output-schema.md 的 `field_lineage_llm_patch` 契约），主 skill 合并写回 `field-lineage/pages/<page-id>.json`。`source_api_patches` 必须按 `protocol + method + endpoint` 合并进 `source_apis[]`。合并后运行：
 
 ```bash
-codewiki scan <target> --output .codewiki/modules/<module>（增量含 --reindex 语义）
+npx codewiki generate <target> --module <module> --update
 ```
 
 该命令只读取补证后的 pages JSON，重建 A/B 级权威反向索引、`pending_llm_verification` 和 `graph-index.json` 字段指纹，不覆盖 LLM patch。
@@ -99,9 +99,9 @@ Phase A 提问时提供 2-3 个选项 + 1 个"我来补充"入口。
 
 **详细模板见 `references/role-templates.md` § 2。**
 
-## Step 4: 生成 Layer 2（Frontend，前端 + AI 视角）
+## Step 4: 生成 Layer 2（Developer，研发 + AI 视角）
 
-**受众：前端开发 + AI。** **3 个文件**（v3.6 从 6 文件精简）。
+**受众：研发 + AI。** 所有语言 profile 共用 **3 个阅读入口**。单前端模块重点呈现组件、状态和字段血缘；多语言模块重点呈现 Source Unit 边界、跨端链路、服务边界和变更风险，避免按语言生成互相割裂的文档树。
 
 每篇同样写稳定语义 frontmatter。正文继续保持人类可读；代码关联只在 `evidence` 中引用 `nav:*` ID，不复制整段 Navigation JSON。
 
@@ -126,7 +126,7 @@ Phase A 关键确认点（合并到一次交互）：
 4. 状态机实体边界
 5. 核心链路自动打分（`is_core_path: high/medium`）里的 medium 项由用户确认
 
-### Frontend 层硬约束
+### Developer 层硬约束
 
 **每篇一行元数据头**（v3.6 新格式）：
 
@@ -148,13 +148,10 @@ Phase A 关键确认点（合并到一次交互）：
 
 ### 4.5.2 `navigation/bindings.jsonl` + 派生检索索引
 
-Product/Frontend Markdown 的 `kb:*` ID 与 Navigation JSON 的 `nav:*` ID 通过一行一个 JSON 的多对多关系关联。运行：
+Product/Developer Markdown 的 `kb:*` ID 与 Navigation JSON 的 `nav:*` ID 通过一行一个 JSON 的多对多关系关联。运行：
 
 ```bash
-codewiki index --project <project-root> --module .codewiki/modules/<module>
-codewiki evaluate --project <project-root> \
-  --cases .codewiki/modules/<module>/retrieval-cases.json --repeat 5 \
-  --output .codewiki/codewiki-evaluation-<module>.json
+npx codewiki generate <target> --module <module> --finalize
 ```
 
 构建命令会校验所有显式 ID、补充正文 `file:line` 对应的精确证据节点、写 `navigation/bindings.jsonl`，并把派生倒排索引写入 `.codewiki/cache/codewiki/`。重复/错层 Knowledge ID、空语义字段、非法 Binding 枚举、悬空 ID 或缺少 `verified/ast` 证据都会失败。缓存不属于知识库产物，不提交。
@@ -165,9 +162,9 @@ codewiki evaluate --project <project-root> \
 
 ### 4.5.3 `navigation/index.yml`（AI 检索路由，v3.6 增强）
 
-它是无 MCP 时给 `rg` 使用的后备路由，固定字段：`query_routes` / `files` / `must_answer`。Claude Code 正常路径是调用 `codewiki_explore`：
+它是内部查询不可用时给 `rg` 使用的后备路由，固定字段：`query_routes` / `files` / `must_answer`。Claude Code/Codex 正常路径是由 codewiki-query Skill 调用内部查询：
 
-1. 语义匹配 Product/Frontend Markdown；
+1. 语义匹配 Product/Developer Markdown；
 2. 经 `bindings.jsonl` 找到代码证据节点；
 3. 在完整 AST 图上展开 2 跳，技术问题展开 3 跳；
 4. 反向绑定回相关语义文档，输出答案上下文。
@@ -198,10 +195,10 @@ codewiki evaluate --project <project-root> \
 
 | 角色 | 先读 | 跳过 | 重点关注 |
 |------|------|------|----------|
-| PM/业务 | `product/*-flow.md` §1 §2 | `frontend/`, `navigation/` | 业务全景 + 字段级页面逻辑（评估新需求"字段现状"）|
-| QA | `product/*-flow.md` §3 改动决策卡 | `frontend/02-*` | 异常路径、边界条件、不可承诺项 |
-| 前端（新人） | `frontend/01-架构与调用图` → `03-坑点与状态` | `product/` | 主链路、状态归属、外部依赖限制 |
-| 前端（变更评估） | `frontend/02-变更影响导航` + `field-lineage/reverse-index.json` | 其余 | 上下游影响、复用清单、核心链路 |
+| PM/业务 | `product/*-flow.md` §1 §2 | `developer/`, `navigation/` | 业务全景 + 字段级页面逻辑（评估新需求"字段现状"）|
+| QA | `product/*-flow.md` §3 改动决策卡 | `developer/02-*` | 异常路径、边界条件、不可承诺项 |
+| 研发（新人） | `developer/01-架构与调用图` → `03-坑点与状态` | `product/` | 主链路、状态归属、外部依赖限制 |
+| 研发（变更评估） | `developer/02-变更影响导航` + `field-lineage/reverse-index.json` | 其余 | 上下游影响、复用清单、核心链路 |
 | AI/工具 | `codewiki_explore`（后备：`navigation/index.yml`） | 无需手工遍历全部文档 | 语义答案 + 字段溯源 + AST 关联证据 |
 
 **详细模板见 `references/role-templates.md` § 1（README）+ § 4（index.yml）。**

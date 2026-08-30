@@ -1,44 +1,75 @@
 {
   "cases": [
     {
+      "id": "eval:<module>:ui-entry",
+      "status": "active",
+      "source": "generated",
+      "created_at": "<ISO-8601 time>",
       "name": "UI 入口",
       "module": "<module>",
       "query": "XXX 按钮怎么实现？",
+      "expected_intent": "chain",
       "expected_knowledge_ids": ["kb:<module>:product:<topic>"],
       "required_evidence_ids": ["nav:ui-event:<stable-key>"]
     },
     {
+      "id": "eval:<module>:business-rule",
+      "status": "active",
+      "source": "generated",
+      "created_at": "<ISO-8601 time>",
       "name": "业务规则",
       "module": "<module>",
       "query": "什么情况下允许退款？",
       "expected_knowledge_ids": ["kb:<module>:product:<topic>"]
     },
     {
+      "id": "eval:<module>:user-feedback",
+      "status": "active",
+      "source": "generated",
+      "created_at": "<ISO-8601 time>",
       "name": "用户反馈",
       "module": "<module>",
       "query": "失败后用户会看到什么？",
       "expected_knowledge_ids": ["kb:<module>:product:<topic>"]
     },
     {
+      "id": "eval:<module>:field-lineage",
+      "status": "active",
+      "source": "generated",
+      "created_at": "<ISO-8601 time>",
       "name": "字段血缘",
       "module": "<module>",
       "query": "这个字段从哪里来？",
-      "expected_knowledge_ids": ["kb:<module>:frontend:<topic>"],
+      "expected_knowledge_ids": ["kb:<module>:developer:<topic>"],
       "required_evidence_ids": ["nav:field-lineage:<stable-key>"]
     },
     {
+      "id": "eval:<module>:impact-analysis",
+      "status": "active",
+      "source": "generated",
+      "created_at": "<ISO-8601 time>",
       "name": "影响分析",
       "module": "<module>",
       "query": "修改接口字段会影响哪些页面？",
-      "expected_knowledge_ids": ["kb:<module>:frontend:<topic>"]
+      "expected_intent": "impact",
+      "expected_knowledge_ids": ["kb:<module>:developer:<topic>"]
     },
     {
+      "id": "eval:<module>:state-path",
+      "status": "active",
+      "source": "generated",
+      "created_at": "<ISO-8601 time>",
       "name": "状态路径",
       "module": "<module>",
       "query": "从处理中到失败经历了什么？",
-      "expected_knowledge_ids": ["kb:<module>:frontend:<topic>"]
+      "expected_intent": "state",
+      "expected_knowledge_ids": ["kb:<module>:developer:<topic>"]
     },
     {
+      "id": "eval:<module>:no-answer",
+      "status": "active",
+      "source": "generated",
+      "created_at": "<ISO-8601 time>",
       "name": "无答案",
       "module": "<module>",
       "query": "知识库明确不包含的问题",

@@ -1,230 +1,353 @@
 # codewiki
 
-**面向前端仓库的知识库 CLI**：把一个 Vue/TS 前端模块扫描成「业务语义 + 架构导航 + 代码证据」三层知识库，提供检索 MCP 给 AI 编码助手（Claude Code / Codex / Cursor 等）自然问答，并用本地命中记录与用户评级做置信度评估。
+把前后端代码编译成可检索、可评测、可通过 Git 共享的业务知识。
+
+codewiki 面向复杂生产仓库和 Monorepo。它使用 SWC、Vue Compiler 与 Node Tree-sitter，从 Vue、React、Java、Go 中提取组件、接口、调用、状态和跨语言链路，再由 Agent 基于这些确定性事实生成带证据的 Markdown。Claude Code、Codex 等 Agent 先检索稳定的业务主脉络，必要时再回到代码补充细节。
+
+它不是在线 RAG 服务，也不需要向量数据库。核心思路是：把高成本、易漏项、受模型能力影响明显的“每次重新读代码”，前移为一次生成、多次复用的知识编译过程。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green.svg)
 
+## 为什么这样做
+
+生产级仓库里，自然语言和代码之间存在明显语义差距：
+
+- 用户问“什么情况下允许退款”，代码里可能只有状态枚举、分支条件和接口字段。
+- Agent 一次性分析长链路容易漏项，不同模型的检索和归纳结果波动很大。
+- 在线 RAG 引入索引服务、embedding、更新和权限成本。
+- 产品、测试和新人需要稳定的业务脉络，而不是每次重新拼接代码片段。
+
+codewiki 选择中间路线：AST 提供确定性骨架，Markdown 抹平语义差距，Agent Skills 负责按需生成和检索，Eval Case 与真实用户反馈负责发现并修复知识缺口。
+
+```text
+前端/后端 Source Units → AST/Profile → 统一图索引 → Markdown 业务知识 → Git 共享
+                                              ↕                  ↓
+用户问题 → 意图路由 → 文档/图检索 → 用户反馈 → Gap → 知识补充 + Eval Case → 回归
 ```
-                       ┌──────────────────────────────────────────┐
-  前端源码 (Vue/TS) ──▶ │  codewiki scan   确定性 AST 管线          │
-   .vue .ts .tsx        │  nav-parser → graph-cluster → deep-     │
-   Pinia / API / IPC    │  analyzer → field-lineage               │
-                       └───────────────┬──────────────────────────┘
-                                       ▼
-                       .codewiki/modules/<module>/   （本地知识库）
-                       ├── product/    业务语义层（PM/QA 视角，Agent 撰写）
-                       ├── frontend/   前端架构层（主链路/影响面/坑点）
-                       └── navigation/ AST 导航层（图/字段血缘/绑定）
-                                       │
-             ┌─────────────────────────┼─────────────────────────┐
-             ▼                         ▼                         ▼
-   ┌───────────────────┐   ┌─────────────────────┐   ┌────────────────────┐
-   │ codewiki mcp      │   │ codewiki preview    │   │ codewiki confidence│
-   │ codewiki_explore  │   │ 交互式 HTML 站点     │   │ 置信度评级 A–E     │
-   │ 语义→绑定→图游走   │   │ 搜索/折叠/评级徽章  │   │ 证据/覆盖/Gap      │
-   └─────────┬─────────┘   └─────────────────────┘   └─────────▲──────────┘
-             ▼                                                  │
-   .codewiki/retrieval.jsonl（命中记录）  .codewiki/feedback.jsonl（用户评级）
-             │                                                  │
-             └──────────── /wiki-explore 差评反哺 ───────────────┘
-                          codewiki case add → knowledge-overlay
-```
-
-## 为什么需要 codewiki
-
-AI 编码助手在一个陌生前端仓库里面临的核心问题不是「找不到符号」，而是**业务语义缺失**：
-
-- “这个按钮点了会发生什么？” —— 需要事件绑定 → handler → store action → API 的完整链路
-- “什么情况下允许退款？” —— 业务规则散落在分支条件、状态机和后端契约里
-- “改后端这个字段会影响哪些页面？” —— 需要 UI 字段 → store → 接口的反向血缘
-- “这份 AI 生成的文档可信吗？” —— 需要证据校验分和真实检索命中记录
-
-通用代码图工具（CodeGraph 等）解决符号级导航；嵌入检索（Cursor 等）解决相似度匹配。codewiki 补上第三块：**把确定性 AST 分析沉淀成带 `file:line` 证据的业务知识库，让 AI 的每次检索命中、每个用户评级都成为知识质量的度量**。
 
 ## 快速开始
 
-```bash
-npm i -g codewiki        # 或 npx codewiki
-
-# 1. 初始化：安装 /wiki-scan、/wiki-explore 指令，注册 MCP，下发工作流文档
-codewiki init
-
-# 2. 在 Claude Code 中建立知识库（AST 扫描 + 撰写语义层 + 索引 + 自检）
-/wiki-scan src/views/order
-
-# 3. 用真实问题验证检索、并给回答评级（差评可一键反哺知识库）
-/wiki-explore 退款什么情况下允许？
-
-# 4. 浏览器查看交互式 HTML 知识库站点
-codewiki preview
-
-# 5. 置信度评估（证据分 + 场景覆盖 + 命中记录 + 用户评级）
-codewiki confidence --days 30
-```
-
-不依赖 Claude Code 也可以直接用 CLI：
+要求 Node.js 18+：
 
 ```bash
-codewiki scan src/views/order          # AST 六阶段管线 → .codewiki/modules/order/navigation/
-codewiki index                         # 构建检索索引
-codewiki query "导出按钮怎么实现"        # 检索
-codewiki evaluate --cases .codewiki/modules/order/retrieval-cases.json --repeat 5
+cd your-repo
+npx codewiki init
 ```
 
-### 接入 MCP
+`init` 会：
 
-`codewiki init` 会自动把下面配置合并进项目 `.mcp.json`（也可手动配置）：
+- 创建 `codewiki.yml`；
+- 创建可提交且不会被重复初始化覆盖的 `.codewiki/INSTRUCTIONS.md`，用于记录重点模块、业务术语和边界；
+- 安装 `codewiki-generate`、`codewiki-query`、`codewiki-review` 到 `.claude/skills/` 和 `.agents/skills/`；
+- 为 Claude Code 和 Codex 配置 codewiki MCP，作为知识检索通道；
+- 精确忽略 `.codewiki/` 中的本地运行产物，保留 `.codewiki/modules/` 可提交。
+
+重启 Claude Code 或 Codex 后，直接使用自然语言：
+
+```text
+为 src/views/order 的订单模块生成知识库
+为 Monorepo 中的订单模块生成全栈知识库，包含 Web 和后端服务
+更新订单模块知识库
+什么情况下允许退款？
+预览订单知识库
+检查订单模块的知识置信度
+```
+
+Skills 只在相关任务出现时加载；检索 Skill 通过初始化时配置的 MCP 获取结构化结果。
+
+## CLI 只负责项目生命周期
+
+公开 CLI 只保留三个命令：
+
+| 命令 | 作用 | 数据安全 |
+| --- | --- | --- |
+| `npx codewiki init` | 初始化配置并安装 Claude Code/Codex Skills 与 MCP | 不覆盖已有团队说明 |
+| `npx codewiki upgrade` | 刷新 Skills、工作流和集成规则 | 保留配置和全部知识资产 |
+| `npx codewiki uninstall` | 移除 Skills、工作流和 codewiki MCP 配置 | 保留 `codewiki.yml`、`INSTRUCTIONS.md` 和 `modules/` |
+
+`upgrade` 适合升级 npm 包后同步项目内的 Skills，并清理旧版 `fe-scan`、`/wiki-scan`、`/wiki-explore` 入口。`uninstall` 只卸载工具集成，不删除团队知识；确认不再需要知识时再手动删除保留内容。
+
+初始化还会写入最小权限集：Claude Code 的本地项目权限仅放行仓库读取、配置的知识目录写入、`codewiki_explore` MCP 和四个 CodeWiki 内部命令；Codex 的项目规则只放行 `generate/query/preview/confidence`。它不会启用 `bypassPermissions`、`approval_policy = "never"`，也不会放行任意 shell、源码写入或仓库外路径。组织级安全策略仍可覆盖这些本地权限。
+
+生成、查询、预览和质量检查通过 Skill 使用：
+
+| 用户意图 | 触发的 Skill | Skill 内部完成 |
+| --- | --- | --- |
+| 生成、更新或补充知识 | `codewiki-generate` | AST 分析、文档生成、证据校验、Case 回归 |
+| 提问并反馈回答质量 | `codewiki-query` | 通过 MCP 完成文档/图检索，记录反馈并建立 Gap |
+| 预览或检查知识质量 | `codewiki-review` | 静态预览、置信报告、新鲜度和覆盖分析 |
+
+底层仍保留稳定的内部执行接口，供 Skills、CI 和自动化调用，但用户不需要记忆这些参数。
+
+## 通过 Skill 生成、更新和补充
+
+首次生成时，对 Claude Code 或 Codex 说：
+
+```text
+为 src/views/order 的订单模块生成知识库
+```
+
+Monorepo 中一个业务模块跨多个目录时，直接说明业务边界：
+
+```text
+为订单模块生成知识库：前端在 apps/order-web，Java 服务在 services/order-api，Go 服务在 services/payment。
+```
+
+Skill 会把这些目录记录成独立 `source_units`。框架版本按每个 Workspace 的 lockfile 和 `package.json` 分别识别，不会用仓库根版本覆盖所有子项目。
+
+代码变化后说：
+
+```text
+更新订单模块知识库，只处理受代码变化影响的内容
+```
+
+`codewiki-generate` Skill 会在内部运行分析、撰写 `product/` 和 `developer/`、建立 Case 并完成收尾。每次生成都会先建立可回滚快照，并根据图变化判断：
+
+- `NO_IMPACT`：没有有效变化，语义文档无需改写；
+- `INDEX_ONLY`：只有位置或索引变化，直接 finalize；
+- `KNOWLEDGE_IMPACT`：业务证据发生变化，只更新列出的 Knowledge 与 Case。
+
+收尾阶段自动执行四件事：
+
+1. 校验 Markdown 中的 `file:line` 证据；
+2. 重建语义文档、bindings 和统一图索引；
+3. 运行该模块所有 active Eval Case；
+4. 成功后提交本次生成事务，失败则恢复生成前知识库并保留失败现场。
+
+用户确认过的反馈、缺陷、事故或决策也通过同一个 Skill 补充。例如：
+
+```text
+把“重复提交导致状态回退”这个已确认缺陷沉淀到订单知识库。
+根因是旧请求晚于新请求返回并覆盖状态，证据在相关代码、提交和回归测试中。
+```
+
+Skill 会确认事实和证据后写入共享 `quality/` 文档，自动创建对应 Eval Case、重建索引并立即回归。支持的证据类型为 `code`、`commit`、`test`、`issue`、`document`、`user_confirmed`；缺陷至少需要 `code`、`commit` 或 `test` 之一。
+
+## 检索与用户反馈
+
+直接向 Claude Code 或 Codex 提问：
+
+```text
+什么情况下允许退款？请基于订单知识库和代码证据回答。
+```
+
+`codewiki-query` Skill 会检索相关知识和代码图，并把命中知识、证据、延迟和模块记录在本地 `.codewiki/retrieval.jsonl`。
+
+检索器会从问题中确定一种意图，并选择对应路径：
+
+| 意图 | 示例 | 检索路径 |
+| --- | --- | --- |
+| `semantic` | “什么情况下允许退款” | Markdown 优先 |
+| `impact` | “修改这个接口会影响哪些页面” | 统一图优先 |
+| `chain` / `lineage` | “调用链是什么”“字段从哪里来” | 统一图优先 |
+| `state` | “处理中如何变成失败” | 文档与统一图联合 |
+| `hybrid` | 同时包含业务语义和技术关系 | 文档与统一图联合 |
+
+路由是确定性的，不依赖具体 LLM；结果会返回 `intent` 和 `route`，便于 Case 回归。
+
+每次 CodeWiki 检索都会返回评价入口；Agent 回答后必须询问“有帮助 / 没帮助”，不能代替用户评分。用户直接回复即可：
+
+```text
+没帮助，没有说明未发货限制。
+```
+
+差评会产生稳定 `gap_id`。Agent 重新读代码、向用户确认修正内容后，调用生成 Skill 补充知识。补充生成的 Eval Case 通过后，Gap 才会关闭；后续回归失败会重新打开。
+
+反馈、查询记录和 Gap 默认只保存在本地，不进入 Git。只有用户确认且有证据的知识和 Eval Case 才进入共享目录。
+
+## Case 评估方法
+
+### Case 是什么
+
+Eval Case 不是知识正文，也不是一条普通问答。它描述“给定一个真实语义问题，检索器应该找到哪些稳定知识和代码证据”。每个模块的 Case 位于：
+
+```text
+.codewiki/modules/<module>/retrieval-cases.json
+```
+
+最小示例：
 
 ```json
 {
-  "mcpServers": {
-    "codewiki": { "command": "npx", "args": ["-y", "codewiki", "mcp"] }
-  }
+  "cases": [
+    {
+      "id": "eval:orders:refund-rule",
+      "status": "active",
+      "module": "orders",
+      "query": "什么情况下允许退款？",
+      "expected_intent": "semantic",
+      "expected_knowledge_ids": ["kb:orders:product:refund-rule"],
+      "required_evidence_ids": ["nav:branch:refund-allowed"]
+    },
+    {
+      "id": "eval:orders:no-answer",
+      "status": "active",
+      "module": "orders",
+      "query": "订单模块不负责的问题",
+      "expect_found": false,
+      "forbidden_text": ["禁止出现的错误结论"]
+    }
+  ]
 }
 ```
 
-AI 助手获得 `codewiki_explore` 工具：按问题自动选择 `semantic`（业务语义）或 `evidence`（代码证据）模式，返回语义文档摘要 + 置信度加权的图路径 + `file:line` 证据清单。无结构化命中时自动降级到 `navigation/index.yml` 文本检索。Claude Code 用户可额外启用陈旧检测 Hook（见 `integrations/claude-code/`）。
+Case 使用稳定 ID，不依赖数组顺序。推荐覆盖七类问题：UI 入口、业务规则、用户反馈、字段血缘、影响分析、状态路径和无答案边界。
 
-## 指令（Claude Code Commands）
+### Case 从哪里来
 
-`codewiki init` 安装两个指令到 `.claude/commands/`（模板源在 [commands/](commands/)）：
+有两个来源：
 
-| 指令 | 作用 |
-| --- | --- |
-| `/wiki-scan [路径] \| --update` | 建立/更新模块知识库：跑 AST 管线 → 按 [agent 工作流](docs/agent-workflow.md) 撰写语义层 → `index` → 固定问题集验收 → `--validate` 证据自检 |
-| `/wiki-explore` | 检索知识库回答业务/代码问题；**回答后必须邀请用户评级**；差评时梳理对话、经用户确认后 `case add` 增补知识并重建索引 |
+1. 生成知识库时，Agent 根据模块主链路和确定性 AST 场景建立基础 Case。
+2. 真实检索出现差评或缺失时，用户确认修正后，生成 Skill 自动把这个问题、修正知识 ID 和 Gap ID 固化成回归 Case。
 
-`/wiki-explore` 的可信度闭环：
+因此 Case 不是一次性准备的测试集，而是随真实使用持续增长的团队资产。
 
-1. 检索命中自动记录到 `.codewiki/retrieval.jsonl`（query、命中 knowledge/evidence id、延迟、是否降级/过期）
-2. 用户评级经 `codewiki feedback record` 写入 `.codewiki/feedback.jsonl`，并通过 `retrieval_id` 与命中记录关联
-3. 评价不好时：Agent 梳理本轮对话、读源码补证 → 用户确认 → `codewiki case add` 写入 `knowledge-overlay`（source=user）→ `codewiki index` 后立即可检索
-4. `codewiki confidence` 把上述信号计入评级：user case 提升场景覆盖分，未命中与差评构成 Gap
+### 单个 Case 如何判定
 
-## 命令一览
+每次回归使用与日常查询完全相同的检索路径。一个 Case 需要同时满足其声明的约束才算通过：
 
-| 命令 | 作用 |
-| --- | --- |
-| `codewiki init` | 初始化项目：指令 + MCP 配置 + 工作流文档下发 + gitignore |
-| `codewiki scan <target> [--output <dir>] [--incremental]` | AST 六阶段管线：nav-parser → graph-cluster → data-shape-tracer → pinia-tracker → deep-analyzer → field-lineage |
-| `codewiki scan <target> <output-dir> --validate` | 证据自检：校验全部 `file:line` 引用、弱措辞、占位符，输出逐文件置信评分 |
-| `codewiki index [--module <m>]` | 构建检索索引（语义倒排 + bindings + 导航图） |
-| `codewiki query "<问题>"` | 检索知识库 |
-| `codewiki evaluate --cases <file.json>` | 固定问题集回归（七类问题模板见 `docs/references/retrieval-cases.example.json`） |
-| `codewiki confidence [--days 30]` | 模块置信度评估 |
-| `codewiki feedback record --rating good\|bad --query "..."` | 记录 /wiki-explore 回答的用户评级 |
-| `codewiki case add --module M --title ... --answer ... --evidence <file:line>` | 增补用户确认的知识（立即参与检索与置信度） |
-| `codewiki site` | 渲染交互式 HTML 站点到 `.codewiki/site/` |
-| `codewiki preview [--port 4173] [--no-open]` | 渲染站点 + 启动本地服务器 + 自动打开浏览器 |
-| `codewiki mcp` | 启动 stdio MCP Server |
+- `expect_found`：结果是否应该命中；适合验证无答案边界。
+- `expected_knowledge_ids`：声明的知识 ID 必须出现在检索结果中。
+- `required_evidence_ids`：声明的 AST/代码证据 ID 必须被召回。
+- `expected_intent`：可选；检索器识别出的意图必须一致，用于防止路由退化。
+- `forbidden_text`：结果中不能出现已知错误结论。
 
-## 本地数据布局
+报告同时给出：
 
-知识库与全部状态都在项目内 `.codewiki/`（init 时加入 gitignore，纯本地、零上报）：
+- `pass_rate`：通过 Case 数 / active Case 数；
+- `top3_knowledge_hit_rate`：期望知识进入前三的比例；
+- `evidence_recall`：必需证据的召回比例；
+- 冷启动、平均和 P95 延迟。
 
+`pass_rate` 判断硬约束是否满足，Top-3 反映排序质量，两者不能混为一个指标。
+
+### 如何评价真实问题是否被 Case 覆盖
+
+回归通过只说明“已有 Case 没退化”，不能说明 Case 覆盖了用户真正关心的问题。因此 `confidence` 还会把最近真实查询映射到 Case：
+
+- 显式 Case 关联、Case 的 `source_ref` 指向本次检索、或归一化问题完全一致：记为 `matched`。
+- 只有 token 相似度达到阈值：记为 `candidate`，需要人工确认，不计入覆盖率。
+- 没有可靠映射：记为 `missing`，表示应评估是否补充 Case 或知识。
+
+命中同一篇通用 Knowledge 不能单独算作 `matched`，否则不同问题会被错误归入同一个基础 Case。
+
+真实问题 Case 覆盖率为：
+
+```text
+matched 唯一问题数 / 最近窗口内唯一问题数
 ```
+
+这种口径把“检索是否稳定”和“测试集是否覆盖真实需求”分开，避免 Case 全通过但用户问题大量缺失的假象。
+
+### 什么时候运行
+
+Case 回归不要求用户记住命令，会在以下时机自动运行：
+
+- 生成或更新知识完成收尾时；
+- 补充确认知识后；
+- 用户要求检查知识置信度时。
+
+回归结果保存在本地 `.codewiki/evaluation-runs/`。Case 文件和知识文档进入 Git，运行结果不进入 Git。
+
+## 置信报告
+
+```text
+检查订单模块的知识置信度，并告诉我哪些知识过期、哪些真实问题缺少 Case。
+```
+
+`codewiki-review` Skill 会运行报告并把机器结果整理为可执行的结论。
+
+报告包含：
+
+- Knowledge 证据新鲜度：`current`、`stale`、`unverified`；
+- 最近真实问题的可靠命中、候选命中与未覆盖数量，并列出每条问题对应的 Case；
+- 用户评价覆盖率、有帮助率和未评价数量；
+- Gap 的总数、待处理、关闭、重开、已关联/未关联 Case 数量；
+- Active Case 的来源分布（自动生成、反馈沉淀、人工/PRD/测试等）与本周期新增数量；
+- 最新 Case 回归通过率、Top-3 命中率和证据召回；
+- 由 Agent 整理、但需要用户确认的补充或拆分 Case 建议。
+
+自动基础 Case、确定性代码事实和用户确认 Case 会分开呈现。报告不会把它们混成一个“知识正确率”总分。
+
+## 目录边界
+
+```text
+codewiki.yml                          # 可提交
 .codewiki/
-├── modules/<module>/           知识库（scan 产物 + Agent 撰写的语义层）
-│   ├── manifest.yml            base_commit、business_terms、coverage_assertions
-│   ├── product/                Layer 1 业务语义：业务全景 / 字段级页面逻辑 / 改动决策卡
-│   ├── frontend/               Layer 2 前端架构：架构与调用图 / 变更影响导航 / 坑点与状态
-│   └── navigation/             Layer 3 AST 导航（确定性）
-│       ├── file-graph.json / func-dependencies.json / component-refs.json
-│       ├── clusters.json       Louvain + PageRank + betweenness（hub 识别）
-│       ├── deep-analysis.json  状态机 / 分支路由 / 超时恢复 / 产品限制候选信号
-│       ├── field-lineage/      字段级血缘：页面字段 → store → API → 加工规则
-│       ├── bindings.jsonl      kb:* ↔ nav:* 稳定绑定
-│       └── validation-report.json
-├── site/                       HTML 站点（preview 消费）
-├── cache/                      检索派生索引（fingerprint 缓存）
-├── retrieval.jsonl             检索命中记录（case 命中 → 置信度输入）
-├── feedback.jsonl              用户评级（good/bad，关联 retrieval_id）
-├── knowledge-overlay/          用户确认后增补的知识（差评反哺产物）
-└── knowledge-health/           置信度历史（只增不改）
+├── INSTRUCTIONS.md                  # 可提交：团队生成约束与业务词汇
+├── modules/                          # 可提交：团队知识资产
+│   └── orders/
+│       ├── manifest.yml
+│       ├── product/
+│       ├── developer/               # 跨前后端研发实现知识
+│       ├── quality/
+│       ├── navigation/              # 含统一 graph.jsonl 与 bindings.jsonl
+│       └── retrieval-cases.json
+├── cache/                            # 本地，不提交
+├── retrieval.jsonl                   # 本地，不提交
+├── feedback.jsonl                    # 本地，不提交
+├── gaps.jsonl                        # 本地，不提交
+├── evaluation-runs/                  # 本地，不提交
+├── knowledge-health/                 # 本地，不提交
+├── transactions/                     # 本地，不提交：生成快照与失败现场
+└── site/                             # 本地，不提交
 ```
 
-希望知识库随 git 版本化时，用 `codewiki scan <target> --output docs/<module>` 显式输出到 `docs/` 即可。
+默认配置：
 
-## 检索模型
+```yaml
+knowledge_root: .codewiki/modules
+state_root: .codewiki
+```
 
-`codewiki_explore` 是混合检索，不是单一图遍历：
+Monorepo 可按业务模块显式配置多个 Source Unit；未配置时会从 `package.json`、`pom.xml`、`build.gradle` 和 `go.mod` 自动发现：
 
-1. **语义层命中**：对 `product/` `frontend/` Markdown 的倒排索引打分（标题/别名/问题句/实体加权）
-2. **绑定展开**：命中文档通过 `bindings.jsonl` 找到 `nav:*` 代码图节点
-3. **图游走**：沿置信度 ≥ 0.4 的边扩展 2–3 跳，动态调用链、字段血缘、事件绑定都在图上
-4. **证据输出**：按深度 + 置信度 + PageRank 排序输出 `file:line` 证据与关联路径
+```yaml
+knowledge_root: .codewiki/modules
+state_root: .codewiki
 
-## 置信度评估
+modules:
+  - name: orders
+    source_units:
+      - name: orders-web
+        path: apps/orders-web
+        framework: vue
+        version: auto
+      - name: orders-admin
+        path: apps/orders-admin
+        framework: react
+        version: auto
+      - name: orders-api
+        path: services/orders
+        language: java
+        framework: spring
+      - name: payment-service
+        path: services/payment
+        language: go
+```
 
-`codewiki confidence` 汇总四类信号，输出 A–E 评级：
+首期兼容 Vue 2.6、Vue 2.7、Vue 3.x，以及 React 16.8、17、18、19 的常见组件模式。Java 和 Go 使用官方 Tree-sitter Grammar；Spring、Gin 和常见 HTTP 路由会进一步生成 Endpoint，并通过 HTTP Method + 标准化 Path 与前端请求建立跨语言关系。
 
-| 信号 | 权重 | 来源 |
-| --- | --- | --- |
-| 证据分 | 50% | `validation-report.json` 逐文件 `file:line` 校验通过率 |
-| 场景覆盖 | 30% | 确定性场景用例（分支/状态机/超时）被文档覆盖比例 + 用户确认知识（source=user） |
-| Gap 闭环 | 20% | 真实检索未命中 + 用户差评构成的问题 Gap |
-| 使用统计 | 参考项 | 查询量、found_rate、降级率、延迟、bad_rate、高频未命中问题 |
+## Agent Skills 与 MCP 检索
 
-评估历史追加在 `.codewiki/knowledge-health/<module>/confidence-history.jsonl`，可观察知识库随代码演进的质量趋势。
+初始化后，Claude Code 从 `.claude/skills/` 加载，Codex 从 `.agents/skills/` 加载。两者共用包内同一份 `codewiki-generate`、`codewiki-query` 和 `codewiki-review`，避免维护两套工作流。
 
-## 与其他方案对比
+Skill 只在相关任务出现时加载，不把完整 `graph.jsonl` 或所有知识文档放进上下文。查询 Skill 调用 `codewiki_explore` MCP 工具；检索器识别语义、影响面、链路、血缘或状态意图，再选择 Markdown、统一图或两者联合。
 
-| 维度 | **codewiki** | [CodeGraph](https://github.com/colbymchenry/codegraph) 等代码图 MCP | Sourcegraph SCIP / LSIF | Cursor / Greptile 嵌入检索 | Aider repo-map | Repomix |
-| --- | --- | --- | --- | --- | --- | --- |
-| 回答的问题 | “退款什么条件允许”“这个字段从哪来”“改 X 影响哪些页面” | “X 在哪定义”“谁调用 Y” | 符号定义/引用/跳转 | 相似代码片段 | 文件级上下文挑选 | 整仓打包喂 LLM |
-| 业务语义层 | ✅ product/frontend 两层（PM/QA 也可读） | ❌ 只有符号图 | ❌ | ⚠️ 依赖嵌入命中 | ❌ | ❌ |
-| 前端深度解析 | ✅ Vue SFC template AST 字段绑定、Pinia store、API/IPC/WS endpoint、字段级血缘 | ⚠️ tree-sitter 通用 AST，模块级 | ⚠️ 语法级 | ⚠️ 文本/分块 | ⚠️ 文件级 | ❌ |
-| 证据保障 | ✅ 每条结论强制 `file:line`，脚本自检 FAIL 即标 draft | ⚠️ 图可信，结论无门禁 | ✅ 索引精确 | ❌ | ❌ | ❌ |
-| 用户反馈闭环 | ✅ 回答评级 → 差评反哺知识 → 置信度提升 | ❌ | ❌ | ⚠️ 隐式 | ❌ | ❌ |
-| 知识质量度量 | ✅ 固定问题集回归 + 置信度评级 + 命中/评级记录 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| 过期检测 | ✅ manifest base_commit ↔ HEAD 比对，检索时提示陈旧 | ✅ 自动重索引 | ⚠️ 需服务端 | ✅ 后台重建 | 每次现算 | 每次重打包 |
-| 浏览体验 | ✅ 交互式 HTML 站点（preview） | ❌ | ⚠️ Web UI（服务端） | ⚠️ IDE 内 | ❌ | ❌ |
-| 基础设施 | **零服务**，纯 Node 本地 | 本地（Kuzu + SQLite） | 需 Sourcegraph 服务 | 需云端嵌入 | 无 | 无 |
-| 适用语言 | 前端为主（Vue 优先，TS/JS/JSX） | 多语言 | 多语言 | 多语言 | 多语言 | 任意 |
+`init` 和 `upgrade` 都会自动为 Claude Code 与 Codex 配置 MCP。MCP 只暴露必要的结构化检索工具；Skill 负责决定何时调用以及如何处理反馈。
 
-**选型建议**：三者互补而非互斥——符号级精确导航（重构、找引用）用 CodeGraph / SCIP / IDE LSP；海量模糊语义匹配用嵌入检索；**业务规则、字段血缘、改动影响 + 可审计证据与质量度量**用 codewiki。codewiki 的不可替代点是证据治理闭环：AST 只出确定性事实、语义文档强制绑定代码、`--validate` 门禁挡住无证据结论、检索命中与用户评级反哺置信度。
+CI 没有 Agent 交互时，可以直接调用内部执行接口；仓库提供了 `examples/codewiki-update.yml` 作为模板。
 
 ## 设计原则
 
-1. **确定性优先**：结构事实全部由 AST 脚本产出；LLM 只做语义转述，不做结构判断
-2. **证据强制**：反捏造分级约束（代码事实/UI 文案/业务术语/产品限制各有证据要求），弱措辞与占位符扣分
-3. **本地优先、零上报**：知识库、命中记录、评级、置信度历史全部落 `.codewiki/`（gitignore），无遥测
-4. **语义 Markdown 为源、HTML 为视图**：Agent 写 Markdown（frontmatter 供检索/校验消费），`preview` 渲染交互式 HTML 站点
-5. **增量友好**：结构指纹四档判级（NONE/COSMETIC/STRUCTURAL/FIELD_ONLY），注释级变更零 LLM 成本
+1. 确定性优先：AST 负责结构事实，LLM 负责可读语义。
+2. 证据优先：代码结论必须可追到 `file:line`，代码外事实必须注明来源。
+3. 文档为源：Markdown 可评审、可 diff、可被产品和测试直接消费。
+4. 本地优先：无服务、无 embedding、无遥测；运行状态默认不进 Git。
+5. 质量可回归：反馈必须能落到 Knowledge、Eval Case 和稳定 Gap。
+6. 索引不是正文：`graph.jsonl` 服务检索、链路和影响分析，人和 Git 评审仍以 Markdown 为主。
 
-## 仓库结构
+多语言与 Monorepo 架构见 [v0.4 技术方案](docs/technical-design-v0.4-multilanguage.md)，融合架构见 [v0.3 技术方案](docs/technical-design-v0.3-fusion.md)，升级说明见 [v0.2 → v0.3 迁移指南](docs/migration-v0.2-v0.3.md)。
 
-```
-bin/codewiki.js        CLI 入口
-src/cli.mjs            命令分发 + scan 管线编排
-src/init.mjs           项目初始化（指令/MCP/工作流文档下发）
-src/site.mjs           HTML 站点渲染（Markdown 源 → 交互式页面）
-src/preview.mjs        本地服务器 + 自动开浏览器
-src/confidence.mjs     置信度评估
-src/feedback.mjs       评级记录 + 差评反哺（case add）
-src/scan/              AST 管线与检索（可独立 node 直跑）
-commands/              /wiki-scan、/wiki-explore 指令模板（init 下发）
-docs/                  Agent 工作流 + 产物 schema + 模板
-integrations/          Claude Code Hook 等宿主集成
-```
-
-依赖刻意保持极简：`@swc/wasm`（纯 WASM 解析，无原生编译）、`@vue/compiler-sfc`、`jlouvain`、`yaml`、`marked`（preview 时 Markdown→HTML 渲染）。TypeScript 解析为可选降级路径（从目标项目解析）。
-
-## 开发
-
-```bash
-npm install
-npm test        # node --test tests/
-```
-
-## Roadmap
-
-- [ ] confidence v2：case 维度命中率聚合（把检索命中记录升级为回归用例）
-- [ ] 置信度趋势看板（`confidence-history.jsonl` 可视化并入 preview 站点）
-- [ ] React/JSX 模板字段绑定
-- [ ] 多仓库联合检索
-
-## License
-
-[MIT](LICENSE)
+完整操作方式见 [用户指南](docs/user-guide.md)。
