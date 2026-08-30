@@ -192,7 +192,6 @@ This makes CodeWiki a shared learning system rather than a one-time documentatio
 
 - [Product and architecture explanation](docs/codewiki-explained.html)
 - [Chinese documentation](docs/README.zh-CN.md)
-- [User guide](docs/user-guide.md)
 - [Example configuration](examples/codewiki-update.yml)
 
 ## License

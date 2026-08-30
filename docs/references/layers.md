@@ -2,9 +2,9 @@
 
 主文件确认深度分析结果后，按本文件生成 Layer 1（Product）/ Layer 2（Developer）/ navigation 入口，再回到主文件 Step 5 写 manifest 与自检。
 
-**v3.6 变化**：产品层从 9 章 → 3 大块；技术层从 6 文件 → 3 文件；新增 Step 2.7.5 字段级溯源生成（field-lineage/*）。
+产品层使用 3 大块，技术层使用 3 个阅读入口；字段级溯源由 Step 2.7.5 生成。
 
-## Step 2.7.5: 字段级溯源生成（v3.6 新增）
+## Step 2.7.5: 字段级溯源生成
 
 Step 2.7 输出 `_intermediate/flows.json` 后进入本步，产 `field-lineage/{index,pages/*,reverse-index}.json`。此产物是**产品层 §2 字段级页面逻辑 markdown 的唯一 SSOT**，同时供 AI 检索 `raw_field / endpoint / coverage`。
 
@@ -59,7 +59,7 @@ npx codewiki generate <target> --module <module> --update
 
 ## Step 3: 生成 Layer 1（Product，PM/QA 视角）
 
-**受众：PM、业务、QA。** 每个业务流一份 `product/<n>-<flow>-flow.md`，**3 大块结构**（v3.6 从 9 章精简）。
+**受众：PM、业务、QA。** 每个业务流一份 `product/<n>-<flow>-flow.md`，**3 大块结构**。
 
 每篇先写稳定语义 frontmatter（字段定义见 `output-schema.md`），至少包含 `id`、`kind`、`title`、`aliases`、`questions`、`entities`、`evidence`。`id` 发布后不可随文件名或标题变化。
 
@@ -91,7 +91,7 @@ npx codewiki generate <target> --module <module> --update
 
 Phase A 提问时提供 2-3 个选项 + 1 个"我来补充"入口。
 
-### Product 层硬约束（沿用 v3.5）
+### Product 层硬约束
 
 **禁出现**（第 §1 / §3 正文）：函数名 · IPC 通道名 · 毫秒数 / 字节数 · 文件路径 · 未翻译英文状态名。**§2 字段表允许出现原始接口字段名**（因为它是产品需要的：接口后端命名 vs 组件命名双列展示）。所有其他技术细节下沉到尾部证据索引。
 
@@ -107,7 +107,7 @@ Phase A 提问时提供 2-3 个选项 + 1 个"我来补充"入口。
 
 ### 3 文件结构
 
-| # | 文件 | 承接 v3.5 | 关键变化 |
+| # | 文件 | 内容 | 关键变化 |
 |---|------|----------|---------|
 | 01 | `01-架构与调用图.md` | 原 01 架构总览 + 02 组件地图 + 03 接口通信 | 组件地图弱化到"关键组件职责表 + hub 标记"；跨进程通信图放这里 |
 | 02 | `02-变更影响导航.md` | 原 04 变更指南 + 06 任务类型对比 | **不再预列变更场景**。改成三张事实索引：改动位置 → 上下游 / 接口 → 调用者+核心链路 / 状态字段 → 产生+消费；**新增复用清单**（读 `field-lineage/reverse-index.json`）；**新增核心链路图** |
@@ -128,7 +128,7 @@ Phase A 关键确认点（合并到一次交互）：
 
 ### Developer 层硬约束
 
-**每篇一行元数据头**（v3.6 新格式）：
+**每篇一行元数据头**（新格式）：
 
 ```markdown
 > 何时来读：<具体触发场景，一句话>；先读：<前置文档>；证据：<主要 navigation JSON>
@@ -160,7 +160,7 @@ npx codewiki generate <target> --module <module> --finalize
 
 `navigation/business-index.yml` 仅为旧版本兼容；新文档不再生成，业务概念由 Markdown 的 `title/aliases/questions/entities` 直接承载。
 
-### 4.5.3 `navigation/index.yml`（AI 检索路由，v3.6 增强）
+### 4.5.3 `navigation/index.yml`（AI 检索路由，增强）
 
 它是内部查询不可用时给 `rg` 使用的后备路由，固定字段：`query_routes` / `files` / `must_answer`。Claude Code/Codex 正常路径是由 codewiki-query Skill 调用内部查询：
 
@@ -169,7 +169,7 @@ npx codewiki generate <target> --module <module> --finalize
 3. 在完整 AST 图上展开 2 跳，技术问题展开 3 跳；
 4. 反向绑定回相关语义文档，输出答案上下文。
 
-**v3.6 新增 query_routes**：
+**字段检索路由**：
 
 ```yaml
 "查字段是怎么显示的":
@@ -184,12 +184,12 @@ npx codewiki generate <target> --module <module> --finalize
   primary: field-lineage/reverse-index.json
 ```
 
-**v3.6 新增 must_answer**：
+**必须回答的问题**：
 - 某字段的完整来源链是什么？（组件 → store → 接口 → 原始字段 → 加工规则）
 - 改某接口字段影响哪些页面字段？
 - 某页面上所有字段的溯源清单？
 
-### 4.5.4 `.codewiki/modules/<module>/README.md`（角色路由器，v3.6 更新阅读路径）
+### 4.5.4 `.codewiki/modules/<module>/README.md`（角色路由器，更新阅读路径）
 
 固定 6 节。角色阅读路径改为：
 

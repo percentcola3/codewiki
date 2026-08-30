@@ -1,9 +1,9 @@
-# codewiki Agent 工作流 — 模块知识库生成 v3.6
+# codewiki Agent 工作流 — 模块知识库生成
 
 > 本文档面向 AI 编码助手（Claude Code / Codex / Cursor 等）：描述 codewiki Skills 如何调用内部 CLI 生成并维护 `.codewiki/modules/<module>/` 知识库。
 > 用户 CLI 只负责 `init`、`upgrade`、`uninstall` 三个项目生命周期操作，其余操作由 Skills 编排。内部 CLI 负责确定性 AST 管线、检索索引与证据自检；product/developer 由 AI 助手基于证据撰写，quality 只保存已确认的缺陷、事故、决策和修正。
 
-> **v0.3 执行补充**：开始生成前先读取 `.codewiki/INSTRUCTIONS.md`。AST 阶段结束后以 `navigation/graph.jsonl` 作为统一机器索引，并按 `NO_IMPACT` / `INDEX_ONLY` / `KNOWLEDGE_IMPACT` 决定是否改写语义文档。Finalize 成功后才接受 Evidence 新指纹；任一校验或 Case 失败会回滚整个模块。
+> **执行约束**：开始生成前先读取 `.codewiki/INSTRUCTIONS.md`。AST 阶段结束后以 `navigation/graph.jsonl` 作为统一机器索引，并按 `NO_IMPACT` / `INDEX_ONLY` / `KNOWLEDGE_IMPACT` 决定是否改写语义文档。Finalize 成功后才接受 Evidence 新指纹；任一校验或 Case 失败会回滚整个模块。
 
 > **多语言执行补充**：业务模块与源码目录分离建模。一个模块可以包含多个 `source_units`，每个 Source Unit 独立记录 path、language、framework、framework_version 和 features。Vue/TypeScript 使用现有深度增强；React 使用 SWC JSX/TSX Profile；Java、Go 使用 Node Tree-sitter。跨语言 HTTP 链路只有 Method + 标准化 Path 精确匹配时才视为 verified。
 
@@ -40,7 +40,7 @@ codewiki 生成的 product / developer / quality / navigation 知识同时服务
 | 研发 | `README.md` → `developer/` | 建立实现心智模型（主链路/状态/分支/恢复/外部依赖） |
 | AI/自动化 | `codewiki-query` Skill（后备：`navigation/index.yml`） | 用户自然提问，先命中业务语义，再展开完整、可追证的代码图 |
 
-**v3.6 核心变化（本版）**：
+**当前能力**：
 - **产物瘦身**：Product 层从 9 章 → 3 大块（业务全景 / 字段级页面逻辑 / 改动决策卡）；Developer 层统一为 3 个阅读入口（架构与调用图 / 变更影响导航 / 坑点与状态）
 - **新增 Step 2.7.5 字段级溯源生成**：产 `field-lineage/{index,pages/*,reverse-index}.json`，作为产品层 §2 markdown 的**唯一 SSOT**（详见 `references/layers.md § Step 2.7.5`）
 - **新增 5 个脚本能力**（`scripts/`）：
@@ -54,11 +54,7 @@ codewiki 生成的 product / developer / quality / navigation 知识同时服务
 - **反向索引结构化**：`field-lineage/reverse-index.json` 用数组格式（method/endpoint/raw_field/used_by 分离），grep 友好
 - **语义文档与代码图双向绑定**：Product/Developer Markdown 使用稳定 `kb:*` ID，Navigation JSON 使用稳定 `nav:*` ID，统一写入 `navigation/bindings.jsonl`
 - **自然问答检索入口**：codewiki-query Skill 调用内部查询，根据用户问题自动选择语义或证据检索，按“语义 Markdown → bindings → AST 图 2-3 跳 → 关联 Markdown”展开；派生索引写入 `.codewiki/cache/`。知识库本体位于 `.codewiki/modules/` 并随 Git 共享，预览由 codewiki-review Skill 生成
-
-**v3.5 保留能力**：
-- README 角色路由器 · 反捏造按事实类型分级 · Step 2.6 候选行为信号 · Step 2.9 待确认项收集
-- Manifest `business_terms` + `coverage_assertions`（v3.6 追加 3 个字段级溯源相关 topic）
-- Step 3/4 交互确认原则（v3.6 简化：从"逐 flow 逐章"改为"块级一次对齐"）
+- **文档与质量约束**：README 角色路由器、按事实类型分级的反捏造规则、候选行为信号、待确认项收集、`business_terms`、`coverage_assertions` 与块级交互确认。
 
 文档结构模板集中在 `references/role-templates.md`，本文仅描述执行流程。JSON schema 集中在 `references/output-schema.md`。
 
@@ -109,9 +105,9 @@ Step 2.5 高频项识别
   ↓
 Step 2.6 候选行为信号抽取 → 行为索引文件（state/ui/timeout/branch/product-limits + 默认 api-payload-shapes）
   ↓
-Step 2.7 业务流识别 → 显式产 _intermediate/flows.json（v3.6 契约）
+Step 2.7 业务流识别 → 显式产 _intermediate/flows.json
   ↓
-Step 2.7.5 字段级溯源生成（v3.6 新增）
+Step 2.7.5 字段级溯源生成
   ├─ node scripts/pinia-tracker.mjs → _intermediate/pinia-stores.json
   ├─ node scripts/data-shape-tracer.mjs → _intermediate/api-payload-shapes.json
   ├─ node scripts/field-lineage.mjs → field-lineage/{index,pages/*,reverse-index}.json + 回填 graph-index.json fieldFingerprint
@@ -121,7 +117,7 @@ Step 2.8 活跃度验证 → 标记 deprecated
   ↓
 Step 2.9 待确认项收集与审阅 → 确认业务术语/业务流命名后继续
   ↓
-Step 3 生成 Layer 1（Product，PM 视角，3 大块 v3.6：业务全景 / 字段级页面逻辑 / 改动决策卡）
+Step 3 生成 Layer 1（Product，PM 视角，3 大块：业务全景 / 字段级页面逻辑 / 改动决策卡）
   ├─ Phase A 一次性对齐（主链路+field-lineage 待补证项+产品限制）
   ├─ Phase B 每个 flow 先写 _intermediate/product-<flow>.draft.json
   ├─ 独立 review pass 只写 product-<flow>.review.json；主对话只读 review，不读 draft 全文
@@ -212,18 +208,18 @@ npx codewiki generate --module <module> --finalize
 | framework-facts.json | SWC/Vue Profile/Tree-sitter | Vue、React、Java、Go 的统一节点、关系、Endpoint 和跨语言链路 |
 | file-graph.json | nav-parser | 文件节点 + 多类型依赖边 |
 | func-dependencies.json | nav-parser | 导出函数及其调用关系 |
-| component-refs.json | nav-parser | Vue 组件使用、条件、事件；**v3.6 新增 `template_bindings`** |
-| graph-index.json | nav-parser + field-lineage 回填 | 文件级索引；**v3.6 新增 `structuralFingerprint` / `fieldFingerprint` / 顶层 `page_fingerprints`** |
+| component-refs.json | nav-parser | Vue 组件使用、条件、事件；含 `template_bindings` |
+| graph-index.json | nav-parser + field-lineage 回填 | 文件级索引；含 `structuralFingerprint`、`fieldFingerprint` 与顶层 `page_fingerprints` |
 | graph-quality.json | nav-parser | 图质量报告（覆盖率/低置信/unresolved）|
 | clusters.json | graph-cluster | Louvain 聚类、hub、PageRank、betweenness |
 | deep-analysis.json | deep-analyzer | 候选派生信号（pipelines/rendering/calculation/event/runtime/flows/validation **+ state_machines / ui_feedback / timeout_recovery / branch_routes / product_limits**）|
-| _intermediate/field-candidates.json | nav-parser | **v3.6 新增**：组件 template_bindings 汇总 |
-| _intermediate/pinia-stores.json | pinia-tracker | **v3.6 新增**：store state/actions/getters 结构 |
-| _intermediate/api-payload-shapes.json | data-shape-tracer | **v3.6 迁移**：hop 追踪 + endpoints_by_file（升级自 data-shapes.json）|
-| _intermediate/flows.json | 主 skill (Step 2.7 后) | **v3.6 契约**：main_flow + branch_flows + fields_referenced |
-| field-lineage/index.json | field-lineage | **v3.6 新增**：全模块字段级溯源元信息 |
-| field-lineage/pages/<page-id>.json | field-lineage (+ LLM 补证) | **v3.6 核心**：每页面字段完整链路（组件 → store → 接口 → 加工规则 → 异常态）|
-| field-lineage/reverse-index.json | field-lineage | **v3.6 新增**：接口 → 字段反查（结构化数组，grep 友好）|
+| _intermediate/field-candidates.json | nav-parser | 组件 template_bindings 汇总 |
+| _intermediate/pinia-stores.json | pinia-tracker | store state/actions/getters 结构 |
+| _intermediate/api-payload-shapes.json | data-shape-tracer | hop 追踪 + endpoints_by_file |
+| _intermediate/flows.json | 主 skill (Step 2.7 后) | main_flow + branch_flows + fields_referenced |
+| field-lineage/index.json | field-lineage | 全模块字段级溯源元信息 |
+| field-lineage/pages/<page-id>.json | field-lineage (+ LLM 补证) | 每页面字段完整链路（组件 → store → 接口 → 加工规则 → 异常态）|
+| field-lineage/reverse-index.json | field-lineage | 接口 → 字段反查（结构化数组，grep 友好）|
 | bindings.jsonl | generate --finalize | `kb:*` 语义文档与 `nav:*` 代码证据的稳定多对多绑定 |
 | graph.jsonl | generate / generate --finalize | 稳定、去重的统一图索引，用于影响面、链路、血缘和检索；不是面向人的正文 |
 | data-shapes.json | data-shape-tracer `--legacy-copy` | 仅兼容旧消费者时生成；默认不产出 |
@@ -297,7 +293,7 @@ rg -n "\"[a-zA-Z0-9:_-]+\"" electron src | rg "ipc|invoke|send|handle|channel"
 
 ## Step 5: 写 Manifest（含 business_terms + coverage_assertions）
 
-`.codewiki/modules/<module>/manifest.yml` 关键变化（v3.6）：
+`.codewiki/modules/<module>/manifest.yml` 关键变化：
 
 - `version: "3.6"`
 - `business_terms`：业务术语翻译白名单（会话给出事实）。Product 层翻译只能用本表。
@@ -415,7 +411,7 @@ ratio    = verified / total       (total > 0)
 
 ## 增量/重写/补丁模式
 
-- **--update**（v3.6 升级为四档判定，基于 `graph-index.json` 三种指纹）：
+- **--update**（升级为四档判定，基于 `graph-index.json` 三种指纹）：
   1. **NONE**（`prev.hash === curr.hash`，兼容输入别名 `contentHash`）：跳过整个模块，不重跑任何脚本
   2. **STRUCTURAL 短路**（`structuralFingerprint` 变）：走现有影响集扩展 + LLM 重写 Layer 1/2 + **全量重跑 field-lineage**（不进 FIELD_ONLY 判定，避免"结构变了+字段又变了"错判 —— P2 优化）
   3. **FIELD_ONLY**（无 STRUCTURAL 变化，但 `fieldFingerprint`/`page_fingerprints` 变，如接口 payload 字段名调整）：只重跑 Step 2.7.5 字段级溯源 + 只重写产品层 §2 字段级页面逻辑；跳过 §1 §3 和技术层
@@ -423,7 +419,7 @@ ratio    = verified / total       (total > 0)
 
   判档由 `scripts/fingerprint.mjs#classifyChange(prev, curr)` 实现；`--update` 主流程读旧 `graph-index.json` + 跑完 nav-parser + field-lineage 后拿到新指纹，逐 file / page 判档。
 
-  基础增量比较逻辑保留 v3.5：`git diff --name-status <base_commit>` 识别 added/modified/deleted/renamed，`git ls-files --others --exclude-standard` 纳入未跟踪；比较口径 `base_commit` 到当前工作区。先把代码增量写入 `navigation/file-graph.json#metadata.incremental`，再读取 `graph-index.json` / 旧 `file-graph.json` 扩展影响集（变更文件、1-2 跳反向依赖、同 IPC/event/store 对端）。只替换影响集文件的出边；只有删除/重命名才删除入边。影响集超过阈值或核心配置变更时自动全量重跑。graph-cluster 和 deep-analyzer 仍全量重跑。
+  基础增量比较逻辑：`git diff --name-status <base_commit>` 识别 added/modified/deleted/renamed，`git ls-files --others --exclude-standard` 纳入未跟踪；比较口径 `base_commit` 到当前工作区。先把代码增量写入 `navigation/file-graph.json#metadata.incremental`，再读取 `graph-index.json` / 旧 `file-graph.json` 扩展影响集（变更文件、1-2 跳反向依赖、同 IPC/event/store 对端）。只替换影响集文件的出边；只有删除/重命名才删除入边。影响集超过阈值或核心配置变更时自动全量重跑。graph-cluster 和 deep-analyzer 仍全量重跑。
 
   **Markdown 重写范围必须再经过 bindings 收窄**：把影响集转换为稳定 `nav:*` ID，在 Navigation 图上展开 2 跳，再从 `bindings.jsonl` 反查 `knowledge_id`；只重写这些 ID 对应的 Product/Developer 文件。若新增代码尚无绑定，只把最邻近的已绑定主题列为候选，不得因此全量重写。完成正文后运行 `npx codewiki generate <target> --module <module> --finalize` 重新校验绑定、缓存与 Case。Layer 1/2 仍按四档决定具体章节，最后更新 manifest base_commit。**update 后必须写一条 revision**（详见下文），revision 需标注每个 module 的最终判档等级。
 - **--update --bugfix**：在 --update 基础上额外生成缺陷深度文件（详见下文）
@@ -506,21 +502,6 @@ revision 字段：
 
 revision 文件名：`<YYYY-MM-DD>-<branch>-<topic>.md`，topic 由本次 update 主导意图决定（bug-fix 模式下用 DEF id；普通 update 用 hub 文件名或 commit subject 关键词）。
 
-## v3.5 → v3.6 老模块增量迁移
-
-当用户明确执行 `/codewiki --update`，且模块仍是 v3.5 时，读取 [`references/migration-v35-v36.md`](references/migration-v35-v36.md) 并按其中流程迁移。
-
-迁移遵循以下边界：
-
-- 将 v3.5 Product/Frontend 视为事实基线和主要输入，迁移到 Product/Developer 时保留已有业务知识与人工修订；不要根据源码从零重写。
-- 根据源码 fingerprint 与产物 schema 复用 Navigation；只补跑缺失或不兼容的分析阶段。
-- 在 `.codewiki/modules/<module>.v36-stage/` 旁路生成，旧模块在验证完成前保持可用。
-- 补齐稳定 `kb:*` ID、`aliases/questions/entities` 与 `bindings.jsonl`，无法归类的旧事实进入“迁移待确认”，不能静默丢弃。
-- 使用同一固定问题集比较迁移前后 Top-3 命中率、证据召回率和事实覆盖；没有退化且严格构建通过后才原子切换。
-- 切换失败立即恢复 v3.5；`.archive/v3.5-<date>/` 仅用于回滚，不作为迁移内容的唯一来源。
-
-迁移前给用户一段摘要，说明复用范围、需要补跑的 Navigation 阶段、待确认事实数和回滚位置。只有高风险事实冲突或无法无损归类时才请求用户确认，不要求用户逐文件检查。
-
 ## 重要规则
 
 1. **所有文档必须中文**，技术术语（函数名、文件路径、枚举值）保留英文
@@ -531,8 +512,8 @@ revision 文件名：`<YYYY-MM-DD>-<branch>-<topic>.md`，topic 由本次 update
 6. **严禁工时估算**——PRD 影响面只输出可数维度（页面数/接口数/状态数/外部依赖数），禁止出现小时/天/人天/sprint/工时/周等估时词
 7. **所有 `.md` 文件使用 `序号-中文前缀-英文标识.md` 命名**
 8. Layer 1 flow 文件：`<序号>-<业务流名>-flow.md`，按主链路权重排序
-9. **Layer 1 文件（v3.6）**：3 大块合并到一份 `<序号>-<业务流名>-flow.md`，严格顺序 §1 业务全景 / §2 字段级页面逻辑 / §3 改动决策卡 + 尾部技术证据索引
-10. **Layer 2 文件（v3.6）**：3 个固定（`01-架构与调用图.md` / `02-变更影响导航.md` / `03-坑点与状态.md`），每篇一行元数据头（不再 6 行）
+9. **Layer 1 文件**：3 大块合并到一份 `<序号>-<业务流名>-flow.md`，严格顺序 §1 业务全景 / §2 字段级页面逻辑 / §3 改动决策卡 + 尾部技术证据索引
+10. **Layer 2 文件**：3 个固定（`01-架构与调用图.md` / `02-变更影响导航.md` / `03-坑点与状态.md`），每篇一行元数据头（不再 6 行）
 11. 文件路径相对于项目根目录
 12. 遵循 `references/output-schema.md` 的 schema + `references/role-templates.md` 的章节模板
 13. **不生成占位内容**——每条记录必须来自实际代码或 navigation JSON
@@ -556,11 +537,11 @@ revision 文件名：`<YYYY-MM-DD>-<branch>-<topic>.md`，topic 由本次 update
 28. 扩展范围的证据必须记录在 manifest.yml 的 expansion_reason 中
 29. 废弃动态通道和废弃 API 必须在 dynamic-flows.md（Electron 项目可补 ipc-flows.md）、`03-坑点与状态.md` 和对应 flow 文件中同时标记
 30. **确认后的内容必须更新 manifest**——Step 2.9 确认的业务术语、业务流命名必须写入 `manifest.yml` 的 `business_terms` 和 `confirmation_checkpoint`
-31. **v3.6 字段级溯源产物（field-lineage/*）是产品层 §2 markdown 的唯一 SSOT**——§2 表格必须从 `field-lineage/pages/<page-id>.json` 渲染（详见 `references/role-templates.md § 2.5` 渲染算法）；不允许手写字段行
-32. **v3.6 LLM 补证结果必须先 patch 到 field-lineage JSON，再运行 `field-lineage.mjs ... --reindex` 后重新渲染 markdown**（保证 pages/reverse-index/fingerprint 同源）；不允许直接改 markdown 而不同步 JSON
-33. **v3.6 反向索引 `field-lineage/reverse-index.json` 是"改后端字段影响哪些页面"的唯一权威**——技术层 §复用清单必须从此 JSON 派生
-34. **v3.6 Step 2.7 后必须显式产 `_intermediate/flows.json`**——是 Step 2.7.5 field-lineage.mjs 判定关键字段（coverage=full）的输入契约
-35. **v3.6 --update 模式按四档判档**——NONE/STRUCTURAL/FIELD_ONLY/COSMETIC，判档结果必须写入 revision（详见"--update 收尾：写 revision"）
+31. **字段级溯源产物（field-lineage/*）是产品层 §2 markdown 的唯一 SSOT**——§2 表格必须从 `field-lineage/pages/<page-id>.json` 渲染；不允许手写字段行。
+32. **LLM 补证结果必须先 patch 到 field-lineage JSON**，再运行 `field-lineage.mjs ... --reindex` 并重新渲染 markdown，保证 pages、reverse-index 与 fingerprint 同源。
+33. **`field-lineage/reverse-index.json` 是后端字段影响页面的权威索引**——技术层复用清单必须从此 JSON 派生。
+34. **Step 2.7 后必须显式产出 `_intermediate/flows.json`**——它是 Step 2.7.5 判定关键字段（coverage=full）的输入契约。
+35. **`--update` 按四档判定**——NONE / STRUCTURAL / FIELD_ONLY / COSMETIC，判定结果必须写入 revision。
 
 
 ## 检索反馈闭环（codewiki-query Skill）
